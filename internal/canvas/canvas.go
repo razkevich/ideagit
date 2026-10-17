@@ -49,6 +49,9 @@ type Cell struct {
 	cont bool
 }
 
+// Cont reports the right half of a double-width glyph.
+func (c Cell) Cont() bool { return c.cont }
+
 type Rect struct{ X, Y, W, H int }
 
 func (r Rect) Contains(x, y int) bool { return x >= r.X && y >= r.Y && x < r.X+r.W && y < r.Y+r.H }
@@ -195,7 +198,7 @@ func (v View) set(x, y int, cell Cell) {
 }
 
 func (v View) Set(x, y int, r rune, s Style) {
-	w := runewidth.RuneWidth(r)
+	w := RuneWidth(r)
 	if w == 2 {
 		if !v.clip.Contains(v.r.X+x+1, v.r.Y+y) {
 			v.set(x, y, Cell{R: ' ', S: s})
@@ -220,7 +223,7 @@ func (v View) Text(x, y int, s string, st Style) int {
 		if r == '\t' {
 			r = ' '
 		}
-		w := runewidth.RuneWidth(r)
+		w := RuneWidth(r)
 		if w == 0 {
 			continue
 		}
@@ -239,7 +242,7 @@ func (v View) TextFit(x, y int, s string, maxW int, st Style) int {
 }
 
 func (v View) TextRight(right, y int, s string, st Style) int {
-	x := right - runewidth.StringWidth(s)
+	x := right - Width(s)
 	v.Text(x, y, s, st)
 	return x
 }
@@ -295,21 +298,46 @@ func (v View) Box(st Style, title string, titleSt Style) {
 	}
 }
 
-func Width(s string) int { return runewidth.StringWidth(s) }
+// RuneWidth is runewidth's width except that Private Use Area code points (Nerd Font
+// icons) count as one cell, which is how terminals render them.
+func RuneWidth(r rune) int {
+	if (r >= 0xE000 && r <= 0xF8FF) || (r >= 0xF0000 && r <= 0x10FFFD) {
+		return 1
+	}
+	return runewidth.RuneWidth(r)
+}
+
+func Width(s string) int {
+	n := 0
+	for _, r := range s {
+		n += RuneWidth(r)
+	}
+	return n
+}
 
 func Truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if runewidth.StringWidth(s) <= w {
+	if Width(s) <= w {
 		return s
 	}
-	return runewidth.Truncate(s, w, "…")
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		rw := RuneWidth(r)
+		if n+rw > w-1 {
+			break
+		}
+		b.WriteRune(r)
+		n += rw
+	}
+	return b.String() + "…"
 }
 
 // TruncateLeft keeps the tail of s, prefixing an ellipsis, IntelliJ-style for long ref names.
 func TruncateLeft(s string, w int) string {
-	if runewidth.StringWidth(s) <= w {
+	if Width(s) <= w {
 		return s
 	}
 	if w <= 1 {
@@ -319,7 +347,7 @@ func TruncateLeft(s string, w int) string {
 	acc := 0
 	i := len(rs)
 	for i > 0 {
-		cw := runewidth.RuneWidth(rs[i-1])
+		cw := RuneWidth(rs[i-1])
 		if acc+cw > w-1 {
 			break
 		}
@@ -395,7 +423,7 @@ func (c *Canvas) SVG(defaultFg, defaultBg Color) string {
 	return b.String()
 }
 
-func runewidthOf(s string) int { return runewidth.StringWidth(s) }
+func runewidthOf(s string) int { return Width(s) }
 
 func xmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")

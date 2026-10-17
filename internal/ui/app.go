@@ -16,6 +16,7 @@ import (
 	"github.com/razkevich/ideagit/internal/changelist"
 	"github.com/razkevich/ideagit/internal/claude"
 	"github.com/razkevich/ideagit/internal/git"
+	"github.com/razkevich/ideagit/internal/kitty"
 	"github.com/razkevich/ideagit/internal/shelf"
 )
 
@@ -131,6 +132,9 @@ type App struct {
 
 	hits      []hit
 	drag      func(Mouse) tea.Cmd
+	regions   []textRegion
+	textSel   *textSel
+	frame     *Canvas
 	lastClick time.Time
 	lastX     int
 	lastY     int
@@ -149,6 +153,26 @@ type App struct {
 	wtStatusLoading bool
 	wtStatusAt      time.Time
 	pendingCmds     []tea.Cmd
+
+	project *ProjectPane
+	editor  *Editor
+	viewer  *Viewer
+	focus   focusArea
+	icons   bool
+
+	restoreFiles  *ProjectState
+	savedState    *ProjectState
+	lastStateSave time.Time
+	// tip is the name of the toolbar button under the pointer, shown in the status bar.
+	tip          string
+	lastRevealed string
+	// prMode is an `ideagit --pr` session: PRs only, no editor, Project pane hidden.
+	// It keeps its own state (prStatePath) so it never overwrites the normal session.
+	prMode bool
+	// projectHidden is the Project pane's visibility in PR mode.
+	projectHidden bool
+	// motionSeq counts pointer moves; a row is hovered only if it saw the latest one.
+	motionSeq int
 }
 
 func NewApp(repo *git.Repo) *App {
@@ -169,18 +193,32 @@ func NewApp(repo *git.Repo) *App {
 	}
 	a := &App{Repo: repo, Th: th, Cfg: cfg, profile: termenv.EnvColorProfile(), focused: true}
 	a.CL = changelist.Load(repo.Root, repo.GitDir)
+	a.project = NewProjectPane()
+	a.icons = IconsEnabled(cfg)
 	a.User = repo.UserName()
 	a.tabs = []Tab{NewLocalChanges(), NewShelfTab(), NewStashTab()}
+	saved := loadProjectState(repo.Root)
 	states := cfg.LogTabs
+	prFilter := cfg.PRFilter
+	if saved != nil {
+		// Filters are per repository; the global ones only seed new projects.
+		states = saved.LogTabs
+		if saved.PRFilter != nil {
+			prFilter = *saved.PRFilter
+		}
+	}
 	if len(states) == 0 {
 		states = []LogTabState{{}}
 	}
 	for i, s := range states {
 		a.tabs = append(a.tabs, NewLogTab(s.Filter, i > 0))
 	}
+	a.tabs = append(a.tabs, NewPRTab(prFilter))
 	if !cfg.ConsoleHidden {
 		a.tabs = append(a.tabs, NewConsoleTab())
 	}
+	a.savedState = saved
+	a.restoreState(saved)
 	return a
 }
 
@@ -193,7 +231,26 @@ func (a *App) SnapshotMode(w, h int) {
 }
 
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(a.Refresh(), a.tick(), a.reloadLogs())
+	return tea.Batch(a.Refresh(), a.tick(), a.reloadLogs(), enableKittyKeys(), a.reopenFiles())
+}
+
+// KittyKeys is set when stdin goes through the kitty keyboard translator.
+var KittyKeys bool
+
+// DoubleShiftMsg is sent when Shift is tapped twice (needs the kitty keyboard protocol).
+type DoubleShiftMsg struct{}
+
+// enableKittyKeys turns the protocol on for the alternate screen, which keeps its own
+// setting; it is re-sent whenever the terminal comes back from a shell or $EDITOR.
+func enableKittyKeys() tea.Cmd {
+	if !KittyKeys {
+		return nil
+	}
+	return func() tea.Msg {
+		time.Sleep(50 * time.Millisecond)
+		os.Stdout.WriteString(kitty.Enable)
+		return nil
+	}
 }
 
 // mergeWorktrees keeps lazily loaded status for worktrees that still exist.
@@ -254,6 +311,9 @@ func (a *App) Refresh() tea.Cmd {
 			a.mergeWorktrees(wts)
 			for _, t := range a.tabs {
 				t.OnData(a)
+			}
+			if a.showProject() {
+				a.project.OnData(a)
 			}
 			for _, o := range a.overlays {
 				if d, ok := o.(interface{ OnData(*App) }); ok {
@@ -388,11 +448,11 @@ func (a *App) LocalChanges() *LocalChanges {
 
 func (a *App) OpenLog(f git.LogFilter) tea.Cmd {
 	t := NewLogTab(f, true)
+	// New Log tabs go right after the existing ones, before PRs and Console.
 	idx := len(a.tabs)
 	for i, tt := range a.tabs {
-		if _, ok := tt.(*ConsoleTab); ok {
-			idx = i
-			break
+		if _, ok := tt.(*LogTab); ok {
+			idx = i + 1
 		}
 	}
 	a.tabs = slices.Insert(a.tabs, idx, Tab(t))
@@ -430,6 +490,9 @@ func (a *App) ShowConsole() {
 }
 
 func (a *App) saveLogTabs() {
+	if a.prMode {
+		return
+	}
 	var states []LogTabState
 	for _, t := range a.tabs {
 		if l, ok := t.(*LogTab); ok {
@@ -474,7 +537,12 @@ func (a *App) Ref(name string, kind git.RefKind) *git.Ref {
 	return nil
 }
 
+// EditFile is "Jump to Source": the embedded editor when available, else $EDITOR.
 func (a *App) EditFile(path string, line int) tea.Cmd {
+	return a.OpenInEditor(path, line)
+}
+
+func (a *App) ExternalEdit(path string, line int) tea.Cmd {
 	editor := os.Getenv("VISUAL")
 	if editor == "" {
 		editor = os.Getenv("EDITOR")
@@ -494,7 +562,7 @@ func (a *App) EditFile(path string, line int) tea.Cmd {
 			if err != nil {
 				a.Error("Cannot open editor", err.Error())
 			}
-			return a.Refresh()
+			return tea.Batch(a.Refresh(), enableKittyKeys())
 		})
 	})
 }
@@ -510,6 +578,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		a.focused = false
 		return a, nil
+	case DoubleShiftMsg:
+		if s, ok := a.Top().(*SearchEverywhere); ok {
+			a.Pop(s)
+			return a, nil
+		}
+		if a.Top() != nil {
+			return a, nil
+		}
+		return a, a.OpenSearch(0)
 	case applyMsg:
 		if m.epoch != epoch.Load() {
 			return a, nil
@@ -523,8 +600,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.focused && time.Since(a.lastClaudeScan) > 4*time.Second {
 			scan = a.scanClaude()
 		}
+		if time.Since(a.lastStateSave) > 30*time.Second {
+			a.SaveState()
+		}
+		if p, ok := a.ActiveTab().(*PRTab); ok && !p.loading && !p.loaded.IsZero() && time.Since(p.loaded) > 2*time.Minute {
+			scan = tea.Batch(scan, p.Reload(a))
+		}
 		return a, a.flush(tea.Batch(a.tick(), a.poll(), scan))
 	case tea.KeyMsg:
+		if m.Type == tea.KeyRunes && len(m.Runes) > 1 && !m.Paste {
+			if parts := splitChords(m); len(parts) > 1 {
+				var cmds []tea.Cmd
+				for _, p := range parts {
+					cmds = append(cmds, a.handleKey(p))
+				}
+				return a, a.flush(tea.Batch(cmds...))
+			}
+		}
 		return a, a.flush(a.handleKey(m))
 	case tea.MouseMsg:
 		return a, a.flush(a.handleMouse(m))
@@ -543,61 +635,124 @@ func (a *App) flush(cmd tea.Cmd) tea.Cmd {
 }
 
 func (a *App) handleKey(k tea.KeyMsg) tea.Cmd {
-	if k.String() == "ctrl+c" {
-		return tea.Quit
+	if cmd, ok := a.selectKey(k); ok {
+		return cmd
 	}
 	if o := a.Top(); o != nil {
 		return o.Key(a, k)
 	}
-	t := a.ActiveTab()
-	if t.Typing() {
-		if cmd, ok := t.Key(a, k); ok {
+	if a.focus == focusEditor && a.editorOpen() {
+		return a.editorKey(k)
+	}
+	if keyName(k) == "ctrl+c" {
+		return a.Quit()
+	}
+	if a.focus == focusProject && a.showProject() {
+		if cmd, ok := a.project.Key(a, k); ok {
 			return cmd
 		}
+		if cmd, ok := a.globalKey(k); ok {
+			return cmd
+		}
+		if keyName(k) == "esc" {
+			a.focus = focusGit
+			if a.editorOpen() {
+				a.focus = focusEditor
+			}
+		}
+		return nil
+	}
+	// The focused pane sees a key before global shortcuts, so single-letter git keys can
+	// mean something local (c = cherry-pick in the Log, commit elsewhere), as in lazygit.
+	t := a.ActiveTab()
+	if cmd, ok := t.Key(a, k); ok {
+		return cmd
 	}
 	if cmd, ok := a.globalKey(k); ok {
 		return cmd
 	}
-	cmd, _ := t.Key(a, k)
-	return cmd
+	if keyName(k) == "esc" && a.editorOpen() {
+		a.focus = focusEditor
+	}
+	return nil
 }
 
 func (a *App) globalKey(k tea.KeyMsg) (tea.Cmd, bool) {
-	s := k.String()
+	s := keyName(k)
+	// IntelliJ's Windows/Linux keymap; single letters are fallbacks for terminals that
+	// can't send Ctrl+Shift chords (those need the kitty keyboard protocol).
 	switch s {
-	case "q":
-		return tea.Quit, true
-	case "alt+1", "1":
-		a.SelectTab(0)
-	case "alt+2", "2":
-		a.SelectTab(1)
-	case "alt+3", "3":
-		a.SelectTab(2)
-	case "alt+4", "4":
-		a.SelectTab(3)
-	case "alt+5", "5":
-		a.SelectTab(4)
-	case "alt+6", "6":
-		a.SelectTab(5)
-	case "alt+7", "7":
-		a.SelectTab(6)
-	case "alt+right", "ctrl+right", "}":
-		a.SelectTab((a.active + 1) % len(a.tabs))
-	case "alt+left", "ctrl+left", "{":
-		a.SelectTab((a.active + len(a.tabs) - 1) % len(a.tabs))
-	case "ctrl+w":
-		a.CloseTab(a.active)
-	case "ctrl+k":
+	case "q", "ctrl+q":
+		return a.Quit(), true
+	case "alt+1", "ctrl+1":
+		a.toggleProject()
+	case "alt+9", "ctrl+9":
+		a.toggleGit()
+	case "alt+0", "ctrl+0":
 		return a.OpenCommit(nil), true
-	case "alt+k", "P":
+	case "1", "2", "3", "4", "5", "6", "7":
+		a.SelectTab(int(s[0] - '1'))
+		a.focus = focusGit
+	case "alt+right", "ctrl+right", "ctrl+shift+]", "}":
+		a.SelectTab((a.active + 1) % len(a.tabs))
+	case "alt+left", "ctrl+left", "ctrl+shift+[", "{":
+		a.SelectTab((a.active + len(a.tabs) - 1) % len(a.tabs))
+	case "ctrl+w", "ctrl+f4":
+		a.CloseTab(a.active)
+	case "ctrl+k", "ctrl+alt+k":
+		return a.OpenCommit(nil), true
+	case "ctrl+shift+k", "alt+k", "P":
 		return a.OpenPush(), true
-	case "ctrl+t", "U":
+	case "ctrl+t", "U", "p":
 		return a.OpenUpdate(), true
-	case "F":
+	case "F", "f":
 		return a.Op("Fetch", a.Repo.Fetch, func(a *App) tea.Cmd { a.Notify("Fetch successful", ""); return nil }), true
-	case "b":
+	case "c":
+		return a.OpenCommit(nil), true
+	case "A":
+		cmd := a.OpenCommit(nil)
+		if d, ok := a.Top().(*CommitDialog); ok {
+			d.setAmend(a, true)
+		}
+		return cmd, true
+	case "M":
+		a.pickRef("Merge into "+a.HeadLabel(), func(a *App, r git.Ref) tea.Cmd {
+			return a.Op("Merge", func() error { return a.Repo.Merge(r.Name) }, nil)
+		})
+	case "R":
+		a.pickRef("Rebase "+a.HeadLabel()+" onto", func(a *App, r git.Ref) tea.Cmd {
+			return a.Op("Rebase", func() error { return a.Repo.Rebase(r.Name) }, nil)
+		})
+	case "S":
+		OpenStashDialog(a, nil)
+	case "x":
+		// lazygit's "x" opens the actions menu of whatever is focused.
+		dot := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(".")}
+		if a.focus == focusProject && a.showProject() {
+			cmd, _ := a.project.Key(a, dot)
+			return cmd, true
+		}
+		cmd, _ := a.ActiveTab().Key(a, dot)
+		return cmd, true
+	case "ctrl+p", "shift+shift":
+		return a.OpenSearch(0), true
+	case "ctrl+shift+n", "ctrl+shift+o", "ctrl+e":
+		return a.OpenSearch(1), true
+	case "ctrl+shift+a":
+		return a.OpenSearch(3), true
+	case "ctrl+shift+`", "b":
 		a.OpenBranches()
-	case "W":
+	case "alt+f1":
+		a.selectOpenedFile(true)
+	case "shift+esc":
+		a.hideActiveToolWindow()
+	case "ctrl+tab":
+		a.cycleFocus()
+	case "ctrl+shift+c":
+		if p := a.selectedPath(); p != "" {
+			return copyToClipboard(a, a.Repo.Abs(p)), true
+		}
+	case "W", "w":
 		a.OpenWorktrees()
 	case "O":
 		a.OpenProjects()
@@ -605,7 +760,7 @@ func (a *App) globalKey(k tea.KeyMsg) (tea.Cmd, bool) {
 		return a.OpenShell(a.Repo.Root), true
 	case "`", "alt+`":
 		a.OpenVCSOperations()
-	case "ctrl+r", "f5":
+	case "ctrl+alt+y", "ctrl+r", "f5":
 		return tea.Batch(a.Refresh(), a.reloadLogs()), true
 	case "?", "f1":
 		a.Push(NewHelp())
@@ -617,6 +772,12 @@ func (a *App) globalKey(k tea.KeyMsg) (tea.Cmd, bool) {
 
 func (a *App) handleMouse(m tea.MouseMsg) tea.Cmd {
 	ev := Mouse{X: m.X, Y: m.Y, Button: m.Button, Action: m.Action, Shift: m.Shift, Ctrl: m.Ctrl, Alt: m.Alt}
+	if a.drag != nil {
+		a.textSel = nil
+	}
+	if cmd, ok := a.selectMouse(ev); ok {
+		return cmd
+	}
 	if a.drag != nil {
 		if ev.Action == tea.MouseActionRelease {
 			d := a.drag
@@ -631,6 +792,8 @@ func (a *App) handleMouse(m tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	if ev.Action == tea.MouseActionMotion {
+		a.tip = ""
+		a.motionSeq++
 		// Hover only goes to the topmost handler (menus highlight the item under the pointer).
 		for i := len(a.hits) - 1; i >= 0; i-- {
 			if a.hits[i].r.Contains(ev.X, ev.Y) && !a.hits[i].pass {
@@ -648,6 +811,10 @@ func (a *App) handleMouse(m tea.MouseMsg) tea.Cmd {
 			a.lastX, a.lastY = ev.X, ev.Y
 		}
 	}
+	return a.dispatch(ev)
+}
+
+func (a *App) dispatch(ev Mouse) tea.Cmd {
 	var cmds []tea.Cmd
 	for i := len(a.hits) - 1; i >= 0; i-- {
 		if a.hits[i].r.Contains(ev.X, ev.Y) {
@@ -676,26 +843,20 @@ func (a *App) Render() *Canvas {
 	c := New(a.W, a.H, th.S())
 	v := c.View()
 	a.hits = a.hits[:0]
+	a.regions = a.regions[:0]
+	a.frame = c
 	if a.H < 6 || a.W < 30 {
 		v.Text(0, 0, "Window too small", th.S())
 		return c
 	}
 	a.drawTitleBar(v.Sub(0, 0, a.W, 1))
-	a.drawTabBar(v.Sub(0, 1, a.W, 1))
-	body := v.Sub(0, 2, a.W, a.H-3)
-	if !a.loaded {
-		body.Text(2, 1, "Loading…", th.S().WithFg(th.Dim))
-	} else if a.loadErr != nil {
-		body.Text(2, 1, "Error: "+a.loadErr.Error(), th.S().WithFg(th.Error))
-	}
-	if a.loaded {
-		a.ActiveTab().Draw(a, body)
-	}
+	a.drawWorkspace(v.Sub(0, 1, a.W, a.H-2))
 	a.drawStatusBar(v.Sub(0, a.H-1, a.W, 1))
 	a.drawNotes(v)
 	for _, o := range a.overlays {
 		// Clicks outside a modal overlay must not reach what's underneath.
 		a.hits = a.hits[:0]
+		a.regions = a.regions[:0]
 		top := o
 		a.Hit(Rect{0, 0, a.W, a.H}, func(m Mouse) tea.Cmd {
 			if m.LeftPress() || m.RightPress() {
@@ -707,6 +868,7 @@ func (a *App) Render() *Canvas {
 		})
 		o.Draw(a, v)
 	}
+	a.drawTextSel(v)
 	return c
 }
 
@@ -790,7 +952,7 @@ func (a *App) openTabsMenu(x, y int) {
 
 func (a *App) drawStatusBar(v View) {
 	th := a.Th
-	st := Style{Fg: th.Dim, Bg: th.HeaderBg}
+	st := Style{Fg: th.Dim, Bg: th.Frame}
 	v.Fill(st)
 	x := 1
 	if len(a.busy) > 0 {
@@ -806,27 +968,32 @@ func (a *App) drawStatusBar(v View) {
 		if h, ok := o.(interface{ Hint() string }); ok {
 			hint = h.Hint()
 		}
+	} else if a.tip != "" {
+		hint = a.tip
+	} else if h := a.workspaceHint(); h != "" {
+		hint = h
 	} else {
 		hint = a.ActiveTab().Hint()
 	}
 
+	// The branch widget lives bottom-right, as in IntelliJ's status bar.
 	right := v.W() - 1
-	branch := a.HeadLabel()
-	if branch != "" {
+	if branch := a.HeadLabel(); branch != "" {
 		label := "⎇ " + branch
-		if a.Status != nil {
-			if a.Status.Ahead > 0 {
-				label += fmt.Sprintf(" ↑%d", a.Status.Ahead)
+		if st := a.Status; st != nil {
+			if ab := aheadBehind(st.Ahead, st.Behind); ab != "" {
+				label += " " + ab
 			}
-			if a.Status.Behind > 0 {
-				label += fmt.Sprintf(" ↓%d", a.Status.Behind)
-			}
-			if a.Status.State != git.StateClean {
-				label = a.Status.State.String() + " " + label
+			if st.State != git.StateClean {
+				label = st.State.String() + " " + label
 			}
 		}
 		bx := v.TextRight(right, 0, label, st.WithFg(th.Fg))
 		a.Hit(Rect{v.Abs().X + bx, v.Abs().Y, Width(label), 1}, func(m Mouse) tea.Cmd {
+			if m.Action == tea.MouseActionMotion {
+				a.tip = "Git Branches (ctrl+shift+`, b)"
+				return nil
+			}
 			if m.LeftPress() {
 				a.OpenBranches()
 			}
@@ -840,11 +1007,7 @@ func (a *App) drawStatusBar(v View) {
 }
 
 func (a *App) breadcrumbs() string {
-	if p, ok := a.ActiveTab().(interface{ SelectedPath() string }); ok {
-		path := p.SelectedPath()
-		if path == "" {
-			return ""
-		}
+	if path := a.editorPath(); path != "" && a.editorOpen() {
 		return a.Repo.Name + " › " + strings.ReplaceAll(path, "/", " › ")
 	}
 	return ""
@@ -949,4 +1112,61 @@ func wrapText(s string, w int) []string {
 		}
 	}
 	return out
+}
+
+func (a *App) PRTab() (*PRTab, int) {
+	for i, t := range a.tabs {
+		if p, ok := t.(*PRTab); ok {
+			return p, i
+		}
+	}
+	return nil, -1
+}
+
+// EnterPRMode turns a freshly built App into an `ideagit --pr` session on pull request
+// n (n <= 0: the list). It must run before Init so no editor files are reopened.
+func (a *App) EnterPRMode(n int) tea.Cmd {
+	p, i := a.PRTab()
+	if p == nil {
+		return nil
+	}
+	a.prMode = true
+	a.projectHidden = true
+	a.restoreFiles = nil
+	a.SelectTab(i)
+	a.focus = focusGit
+	p.filter = PRFilter{State: "open", Author: "@me"}
+	p.pending = 0
+	if st := loadState(prStatePath(a.Repo.Root)); st != nil && st.PRFilter != nil {
+		p.filter = *st.PRFilter
+		p.pending = st.PRSelected
+	}
+	p.text.SetValue(p.filter.Text)
+	if n > 0 {
+		p.pending = n
+	}
+	return tea.Batch(p.Reload(a), p.loadLabels(a))
+}
+
+// hovered reports whether a hover recorded at seq is still current.
+func (a *App) hovered(seq int) bool { return seq != 0 && seq == a.motionSeq }
+
+// checkGlyph draws IntelliJ-style checkboxes with Nerd Font glyphs when available.
+func (a *App) checkGlyph(state int) string {
+	if a.icons {
+		switch state {
+		case Checked:
+			return "\U000f0132"
+		case Partial:
+			return "\U000f0856"
+		}
+		return "\U000f0131"
+	}
+	switch state {
+	case Checked:
+		return "[x]"
+	case Partial:
+		return "[-]"
+	}
+	return "[ ]"
 }

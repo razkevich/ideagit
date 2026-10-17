@@ -135,7 +135,7 @@ func (d *CommitDialog) Hint() string {
 	if d.focus == cfDiff {
 		return d.diff.Hint() + " · tab next"
 	}
-	return "space check · tab next field · ^K commit · alt+K commit and push · alt+M message history · esc cancel"
+	return "space check · tab next field · ctrl+enter commit · ctrl+alt+k commit and push · alt+m amend · ctrl+m history · esc cancel"
 }
 
 func (d *CommitDialog) OnData(a *App) {
@@ -165,6 +165,7 @@ func (d *CommitDialog) rebuild(a *App) {
 	d.files = append(append(d.files, inList...), unversioned...)
 	mk := func(f git.FileStatus) *Node {
 		n := &Node{ID: "f:" + f.Path, Label: baseOf(f.Path), Extra: dirOf(f.Path), LabelFg: th.KindColor(f.Kind), Data: f, Check: Unchecked}
+		a.setFileIcon(n, f.Path)
 		if d.checked[f.Path] {
 			n.Check = Checked
 			if ex := d.diff.Excluded[f.Path]; len(ex) > 0 {
@@ -265,7 +266,7 @@ func (d *CommitDialog) cycle(dir int) {
 }
 
 func (d *CommitDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
-	s := k.String()
+	s := keyName(k)
 	switch s {
 	case "esc":
 		if d.focus == cfTree && d.tree.Typing() {
@@ -279,19 +280,28 @@ func (d *CommitDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
 	case "shift+tab":
 		d.cycle(-1)
 		return nil
-	case "ctrl+k", "ctrl+s":
+	case "ctrl+enter", "ctrl+k", "ctrl+s":
 		return d.commit(a, false)
-	case "alt+k":
+	case "ctrl+alt+k", "alt+k":
 		return d.commit(a, true)
-	case "alt+m", "ctrl+h":
+	case "ctrl+m", "alt+h":
 		d.history(a)
 		return nil
-	case "alt+a":
+	case "alt+m":
+		// IntelliJ's mnemonic for "Amend commit".
 		d.setAmend(a, !d.amend)
 		return nil
 	}
 	switch d.focus {
 	case cfTree:
+		if s == "f4" {
+			if n := d.tree.Selected(); n != nil {
+				if f, ok := n.Data.(git.FileStatus); ok {
+					// IntelliJ closes the commit dialog when jumping to source.
+					return a.JumpToSource(f.Path, 0)
+				}
+			}
+		}
 		cmd, _ := d.tree.Key(a, k)
 		return cmd
 	case cfDiff:
@@ -411,6 +421,12 @@ func (d *CommitDialog) commit(a *App, push bool) tea.Cmd {
 		if partial && !cf.Deleted {
 			old, _ := repo.Show("HEAD", firstNonEmpty(f.OrigPath, f.Path))
 			cur, _ := repo.ReadWorktree(f.Path)
+			if shown, ok := d.diff.Shown[f.Path]; !ok || shown != string(cur) {
+				d.Err = f.Path + " changed since you picked its chunks; review them again"
+				delete(d.diff.Excluded, f.Path)
+				d.rebuild(a)
+				return d.preview(a)
+			}
 			r := diff.Compute(old, cur, diff.IgnoreNone)
 			if !r.Binary {
 				cf.Content = r.Merge(func(bi int) bool { return !ex[bi] })
@@ -466,7 +482,7 @@ func (d *CommitDialog) Draw(a *App, screen View) {
 	v := screen.Sub(x0, 1, W, H)
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
-	v.Box(Style{Fg: th.Border, Bg: bg}, "Commit Changes", Style{Fg: th.Fg, Bg: bg, Bold: true})
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, "Commit Changes", Style{Fg: th.Fg, Bg: bg, Bold: true})
 	inner := v.Sub(1, 1, W-2, H-2)
 	iw, ih := inner.W(), inner.H()
 
@@ -568,14 +584,6 @@ func (d *CommitDialog) Draw(a *App, screen View) {
 	inner.FillRect(0, by, iw, 1, Style{Bg: bg})
 	if d.Err != "" {
 		inner.TextFit(1, by, "⚠ "+d.Err, iw/2, Style{Fg: th.Error, Bg: bg})
-	} else {
-		n := 0
-		for _, f := range d.files {
-			if d.checked[f.Path] {
-				n++
-			}
-		}
-		inner.TextFit(1, by, fmt.Sprintf("%d of %s selected", n, plural(len(d.files), "file")), iw/2, Style{Fg: th.Dim, Bg: bg})
 	}
 	bx := iw - 1
 	labels := []struct {

@@ -29,7 +29,7 @@ func baseOf(p string) string { return path.Base(p) }
 func localSource(repo *git.Repo, head string, f git.FileStatus) DiffSource {
 	left := "Base version"
 	if head != "" {
-		left = short(head) + "  " + f.Path
+		left = short(head)
 	}
 	right := "Current version"
 	if f.Kind == git.Untracked || f.Kind == git.Added {
@@ -43,7 +43,7 @@ func localSource(repo *git.Repo, head string, f git.FileStatus) DiffSource {
 		right = "Current version (with conflict markers)"
 	}
 	return DiffSource{
-		Path: f.Path, Header: "local:" + f.Path, LeftTitle: left, RightTitle: right,
+		Path: f.Path, Kind: f.Kind, Header: "local:" + f.Path, LeftTitle: left, LeftPath: firstNonEmpty(f.OrigPath, f.Path), RightTitle: right,
 		RightEditable: f.Kind != git.Deleted,
 		Load: func() ([]byte, []byte, error) {
 			var old []byte
@@ -71,8 +71,8 @@ func commitSource(repo *git.Repo, hash, parent string, f git.ChangedFile) DiffSo
 		leftName = "Absent"
 	}
 	return DiffSource{
-		Path: f.Path, Header: "commit:" + hash + ":" + f.Path,
-		LeftTitle: leftName + "  " + firstNonEmpty(f.OrigPath, f.Path), RightTitle: short(hash) + "  " + f.Path,
+		Path: f.Path, Kind: f.Kind, Header: "commit:" + hash + ":" + f.Path,
+		LeftTitle: leftName, LeftPath: firstNonEmpty(f.OrigPath, f.Path), RightTitle: short(hash),
 		Load: func() ([]byte, []byte, error) {
 			src := f.Path
 			if f.OrigPath != "" {
@@ -92,8 +92,8 @@ func commitSource(repo *git.Repo, hash, parent string, f git.ChangedFile) DiffSo
 
 func compareSource(repo *git.Repo, rev, label string, f git.ChangedFile) DiffSource {
 	return DiffSource{
-		Path: f.Path, Header: "cmp:" + rev + ":" + f.Path,
-		LeftTitle: label + "  " + firstNonEmpty(f.OrigPath, f.Path), RightTitle: "Current version",
+		Path: f.Path, Kind: f.Kind, Header: "cmp:" + rev + ":" + f.Path,
+		LeftTitle: label, LeftPath: firstNonEmpty(f.OrigPath, f.Path), RightTitle: "Current version",
 		RightEditable: f.Kind != git.Deleted,
 		Load: func() ([]byte, []byte, error) {
 			src := firstNonEmpty(f.OrigPath, f.Path)
@@ -111,8 +111,8 @@ func stashSource(repo *git.Repo, s git.Stash, f git.ChangedFile) DiffSource {
 	}
 	name := "Stash@{" + itoa(s.Index) + "}"
 	return DiffSource{
-		Path: f.Path, Header: "stash:" + s.Hash + ":" + f.Path,
-		LeftTitle: "Current version  " + f.Path, RightTitle: "🔒" + name,
+		Path: f.Path, Kind: f.Kind, Header: "stash:" + s.Hash + ":" + f.Path,
+		LeftTitle: "Current version", LeftPath: f.Path, RightTitle: "🔒" + name,
 		LeftEditable: true,
 		Load: func() ([]byte, []byte, error) {
 			cur, _ := repo.ReadWorktree(f.Path)
@@ -127,8 +127,8 @@ func stashSource(repo *git.Repo, s git.Stash, f git.ChangedFile) DiffSource {
 
 func shelfSource(repo *git.Repo, s *shelf.Shelf, f *shelf.File) DiffSource {
 	return DiffSource{
-		Path: f.Path, Header: "shelf:" + s.Name + ":" + f.Path,
-		LeftTitle: "Base version  " + f.Path, RightTitle: "Shelved: " + s.Description,
+		Path: f.Path, Kind: f.Kind, Header: "shelf:" + s.Name + ":" + f.Path,
+		LeftTitle: "Base version", LeftPath: f.Path, RightTitle: "Shelved: " + s.Description,
 		Load: func() ([]byte, []byte, error) {
 			base := f.BaseText(repo)
 			sh, err := f.ShelvedText(repo)
@@ -173,4 +173,18 @@ func (a *App) headHash() string {
 		return ""
 	}
 	return a.Status.OID
+}
+
+// compareSourceReversed puts the working tree on the left, for "Swap branches".
+func compareSourceReversed(repo *git.Repo, rev, label string, f git.ChangedFile) DiffSource {
+	s := compareSource(repo, rev, label, f)
+	load := s.Load
+	return DiffSource{
+		Path: f.Path, Kind: f.Kind, Header: "cmpr:" + rev + ":" + f.Path,
+		LeftTitle: "Current version", LeftPath: f.Path, RightTitle: label, LeftEditable: f.Kind != git.Deleted,
+		Load: func() ([]byte, []byte, error) {
+			old, cur, err := load()
+			return cur, old, err
+		},
+	}
 }

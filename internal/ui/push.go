@@ -11,19 +11,20 @@ import (
 )
 
 type PushDialog struct {
-	remote  string
-	local   string
-	target  *TextInput
-	commits []*git.Commit
-	list    *Tree
-	files   *Tree
-	tags    bool
-	setUp   bool
-	loading bool
-	editing bool
-	focus   int
-	gen     int
-	err     string
+	remote   string
+	local    string
+	target   *TextInput
+	commits  []*git.Commit
+	list     *Tree
+	files    *Tree
+	tags     bool
+	setUp    bool
+	loading  bool
+	editing  bool
+	focus    int
+	gen      int
+	filesGen int
+	err      string
 }
 
 func (a *App) OpenPush() tea.Cmd {
@@ -102,9 +103,14 @@ func (p *PushDialog) loadFiles(a *App) tea.Cmd {
 	}
 	c := n.Data.(*git.Commit)
 	repo := a.Repo
+	p.filesGen++
+	gen := p.filesGen
 	return Async(func() func(a *App) tea.Cmd {
 		files, _ := repo.CommitFiles(c)
 		return func(a *App) tea.Cmd {
+			if gen != p.filesGen {
+				return nil
+			}
 			p.files.SetRoots(changedFileNodes(a, "push", files))
 			return nil
 		}
@@ -127,7 +133,7 @@ func (p *PushDialog) push(a *App, force bool) tea.Cmd {
 
 func (p *PushDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
 	if p.editing {
-		switch k.String() {
+		switch keyName(k) {
 		case "enter", "esc", "tab":
 			p.editing = false
 			return p.load(a)
@@ -135,13 +141,13 @@ func (p *PushDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
 		p.target.Key(k)
 		return nil
 	}
-	switch k.String() {
+	switch keyName(k) {
 	case "esc":
 		a.Pop(p)
 		return nil
-	case "enter", "ctrl+k", "alt+k":
+	case "enter", "ctrl+enter", "ctrl+k", "alt+k":
 		return p.push(a, false)
-	case "alt+f", "ctrl+f":
+	case "ctrl+shift+enter", "alt+f", "ctrl+f":
 		return p.push(a, true)
 	case "e":
 		p.editing = true
@@ -170,7 +176,7 @@ func (p *PushDialog) Draw(a *App, screen View) {
 	v := screen.Sub((screen.W()-w)/2, max(1, (screen.H()-h)/3), w, h)
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
-	v.Box(Style{Fg: th.Border, Bg: bg}, "Push Commits to "+a.Repo.Name, Style{Fg: th.Fg, Bg: bg, Bold: true})
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, "Push Commits to "+a.Repo.Name, Style{Fg: th.Fg, Bg: bg, Bold: true})
 	x := 2
 	x = v.Text(x, 1, "⎇ "+p.local, Style{Fg: th.Fg, Bg: bg, Bold: true})
 	x = v.Text(x, 1, " → ", Style{Fg: th.Dim, Bg: bg})
@@ -283,7 +289,9 @@ func (c *ConflictsDialog) OnData(a *App) {
 			if f.Kind != git.Conflict {
 				continue
 			}
-			nodes = append(nodes, &Node{ID: f.Path, Label: f.Path, LabelFg: th.Conflict, Right: conflictKind(f), Check: NoCheck, Data: f})
+			n := &Node{ID: f.Path, Label: baseOf(f.Path), Extra: dirOf(f.Path), LabelFg: th.Conflict, Right: conflictKind(f), Check: NoCheck, Data: f}
+			a.setFileIcon(n, f.Path)
+			nodes = append(nodes, n)
 		}
 	}
 	c.tree.SetRoots(nodes)
@@ -331,7 +339,7 @@ func (c *ConflictsDialog) accept(a *App, theirs bool) tea.Cmd {
 }
 
 func (c *ConflictsDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
-	switch k.String() {
+	switch keyName(k) {
 	case "esc":
 		a.Pop(c)
 		return nil
@@ -339,9 +347,9 @@ func (c *ConflictsDialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
 		return c.accept(a, false)
 	case "t":
 		return c.accept(a, true)
-	case "m", "enter":
+	case "m", "enter", "f4":
 		if fs := c.selected(); len(fs) > 0 {
-			return a.EditFile(fs[0].Path, 0)
+			return a.JumpToSource(fs[0].Path, 0)
 		}
 		return nil
 	}
@@ -356,7 +364,7 @@ func (c *ConflictsDialog) Draw(a *App, screen View) {
 	v := screen.Sub((screen.W()-w)/2, max(1, (screen.H()-h)/3), w, h)
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
-	v.Box(Style{Fg: th.Border, Bg: bg}, "Conflicts", Style{Fg: th.Fg, Bg: bg, Bold: true})
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, "Conflicts", Style{Fg: th.Fg, Bg: bg, Bold: true})
 	tw := w - 22
 	c.tree.Draw(a, v.Sub(1, 1, tw, h-2))
 	by := 1

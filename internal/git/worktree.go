@@ -146,6 +146,7 @@ func worktreeActivity(path string) time.Time {
 
 // WorktreeStatus fills dirty/ahead/behind/merged for one worktree.
 func (r *Repo) WorktreeStatus(w *Worktree, base string) {
+	w.Dirty, w.Ahead, w.Behind, w.Merged = 0, 0, 0, false
 	if w.Prunable || w.Bare {
 		w.StatusOK = true
 		return

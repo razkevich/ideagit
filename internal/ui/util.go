@@ -30,7 +30,7 @@ func (a *App) OpenShell(dir string) tea.Cmd {
 	c.Dir = dir
 	c.Env = append(os.Environ(), "IDEAGIT_SHELL=1")
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return apply(func(a *App) tea.Cmd { return tea.Batch(a.Refresh(), a.reloadLogs()) })
+		return apply(func(a *App) tea.Cmd { return tea.Batch(a.Refresh(), a.reloadLogs(), enableKittyKeys()) })
 	})
 }
 

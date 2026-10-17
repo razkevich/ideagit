@@ -273,6 +273,7 @@ func (r *Repo) Commit(req CommitRequest) (string, error) {
 		}
 	}
 	var touched []string
+	fileMode := r.Config("core.fileMode") != "false"
 	for _, f := range req.Files {
 		if f.OrigPath != "" && f.OrigPath != f.Path {
 			if _, err := exec("", "update-index", "--force-remove", "--", f.OrigPath); err != nil {
@@ -290,24 +291,48 @@ func (r *Repo) Commit(req CommitRequest) (string, error) {
 		mode := "100644"
 		var content []byte
 		fi, err := os.Lstat(r.Abs(f.Path))
+		if os.IsNotExist(err) {
+			// E.g. a conflict resolved by deleting the file.
+			if _, err := exec("", "update-index", "--force-remove", "--", f.Path); err != nil {
+				return "", err
+			}
+			continue
+		}
 		if err != nil {
 			return "", err
+		}
+		if fi.IsDir() {
+			// A submodule: commit its checked-out commit as a gitlink.
+			head, err := r.run(runOpts{}, "-C", f.Path, "rev-parse", "HEAD")
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", f.Path, err)
+			}
+			if _, err := exec("", "update-index", "--add", "--cacheinfo", "160000,"+strings.TrimSpace(head)+","+f.Path); err != nil {
+				return "", err
+			}
+			continue
 		}
 		switch {
 		case fi.Mode()&os.ModeSymlink != 0:
 			mode = "120000"
 			t, _ := os.Readlink(r.Abs(f.Path))
 			content = []byte(t)
-		case fi.Mode()&0o111 != 0:
+		case fileMode && fi.Mode()&0o111 != 0:
 			mode = "100755"
+		case !fileMode:
+			mode = r.trackedMode(f.Path, mode)
 		}
 		if f.Content != nil {
 			content = f.Content
 		}
 		var sha string
-		if content != nil {
-			sha, err = r.run(runOpts{stdin: string(content)}, "hash-object", "-w", "--stdin")
-		} else {
+		switch {
+		case f.Content != nil:
+			// --path applies the file's clean filters (LFS, autocrlf) like `git add` would.
+			sha, err = r.run(runOpts{stdin: string(content)}, "hash-object", "-w", "--stdin", "--path="+f.Path)
+		case content != nil:
+			sha, err = r.run(runOpts{stdin: string(content)}, "hash-object", "-w", "--stdin", "--no-filters")
+		default:
 			sha, err = r.run(runOpts{}, "hash-object", "-w", "--", f.Path)
 		}
 		if err != nil {
@@ -343,6 +368,22 @@ func (r *Repo) Commit(req CommitRequest) (string, error) {
 		r.Exec("reset", "-q", "HEAD")
 	}
 	return out, nil
+}
+
+// trackedMode returns the mode git already has for path (index, then HEAD), used when
+// core.fileMode=false makes the executable bit on disk meaningless.
+func (r *Repo) trackedMode(path, def string) string {
+	if out, err := r.Read("ls-files", "-s", "--", path); err == nil {
+		if f := strings.Fields(out); len(f) > 0 {
+			return f[0]
+		}
+	}
+	if out, err := r.Read("ls-tree", "HEAD", "--", path); err == nil {
+		if f := strings.Fields(out); len(f) > 0 {
+			return f[0]
+		}
+	}
+	return def
 }
 
 func copyFile(src, dst string) error {
@@ -390,4 +431,80 @@ func (r *Repo) MergeFile(current, base, other []byte) ([]byte, bool, error) {
 func (r *Repo) IsPushed(hash string) bool {
 	_, err := r.Read("merge-base", "--is-ancestor", hash, "@{upstream}")
 	return err == nil
+}
+
+// Stage adds the paths' working-tree state (including deletions) to the index.
+func (r *Repo) Stage(paths []string) error {
+	_, err := r.Exec(append([]string{"add", "-A", "--"}, paths...)...)
+	return err
+}
+
+// Unstage resets the paths in the index to HEAD, keeping the working tree.
+func (r *Repo) Unstage(paths []string, unborn bool) error {
+	var err error
+	if unborn {
+		_, err = r.Exec(append([]string{"rm", "--cached", "-r", "-q", "--"}, paths...)...)
+	} else {
+		_, err = r.Exec(append([]string{"restore", "--staged", "--"}, paths...)...)
+	}
+	return err
+}
+
+// GitHubRemote picks the remote gh talks to: "upstream" in fork setups, else "origin",
+// else the first remote pointing at github.com.
+func (r *Repo) GitHubRemote() string {
+	remotes := r.Remotes()
+	url := func(name string) string { return r.Config("remote." + name + ".url") }
+	for _, pref := range []string{"upstream", "origin"} {
+		for _, rm := range remotes {
+			if rm == pref && strings.Contains(url(rm), "github.com") {
+				return rm
+			}
+		}
+	}
+	for _, rm := range remotes {
+		if strings.Contains(url(rm), "github.com") {
+			return rm
+		}
+	}
+	if len(remotes) > 0 {
+		return remotes[0]
+	}
+	return "origin"
+}
+
+func (r *Repo) HasCommit(oid string) bool {
+	if oid == "" {
+		return false
+	}
+	_, err := r.Read("cat-file", "-e", oid+"^{commit}")
+	return err == nil
+}
+
+// FetchPR fetches a pull request's head into refs/ideagit/pr/N (GitHub keeps
+// refs/pull/N/head even for merged, closed and cross-repository PRs).
+func (r *Repo) FetchPR(remote string, n int) error {
+	ref := fmt.Sprintf("refs/pull/%d/head", n)
+	_, err := r.Exec("fetch", "--no-tags", "--quiet", remote, "+"+ref+":refs/ideagit/pr/"+fmt.Sprint(n))
+	return err
+}
+
+// FetchPRs is FetchPR for several pull requests in one round trip.
+func (r *Repo) FetchPRs(remote string, ns []int) error {
+	args := []string{"fetch", "--no-tags", "--quiet", remote}
+	for _, n := range ns {
+		args = append(args, fmt.Sprintf("+refs/pull/%d/head:refs/ideagit/pr/%d", n, n))
+	}
+	_, err := r.Exec(args...)
+	return err
+}
+
+func (r *Repo) FetchBranch(remote, branch string) error {
+	_, err := r.Exec("fetch", "--no-tags", "--quiet", remote, branch)
+	return err
+}
+
+func (r *Repo) MergeBase(a, b string) (string, error) {
+	out, err := r.Read("merge-base", a, b)
+	return strings.TrimSpace(out), err
 }

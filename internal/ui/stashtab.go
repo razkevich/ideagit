@@ -72,6 +72,7 @@ func NewStashTab() *StashTab {
 	t.list.OnContext = func(a *App, n *Node, x, y int) tea.Cmd { t.menu(a, x, y); return nil }
 	t.files.OnSelect = func(a *App, n *Node) tea.Cmd { return t.preview(a, false) }
 	t.files.OnActivate = func(a *App, n *Node) tea.Cmd { return t.preview(a, true) }
+	t.files.OnContext = func(a *App, n *Node, x, y int) tea.Cmd { t.fileMenu(a, x, y); return nil }
 	return t
 }
 
@@ -80,8 +81,11 @@ func (t *StashTab) Closable() bool { return false }
 func (t *StashTab) Typing() bool   { return t.list.Typing() || t.files.Typing() }
 
 func (t *StashTab) Hint() string {
-	if t.focus == sfDiff {
+	switch t.focus {
+	case sfDiff:
 		return t.diff.Hint()
+	case sfFiles:
+		return filesHint
 	}
 	return "a apply · p pop · ⌦ drop · B unstash as branch · tab switch pane · . menu"
 }
@@ -155,6 +159,7 @@ func changedFileNodes(a *App, prefix string, files []git.ChangedFile) []*Node {
 	th := a.Th
 	leaf := func(f git.ChangedFile) *Node {
 		n := &Node{ID: "f:" + f.Path, Label: baseOf(f.Path), LabelFg: th.KindColor(f.Kind), Check: NoCheck, Data: f}
+		a.setFileIcon(n, f.Path)
 		if !a.Cfg.GroupByDir {
 			n.Extra = dirOf(f.Path)
 		}
@@ -194,9 +199,7 @@ func (t *StashTab) preview(a *App, full bool) tea.Cmd {
 		srcs = append(srcs, stashSource(a.Repo, *t.cur, x))
 	}
 	if full {
-		w := NewDiffWindow(f.Path)
-		a.Push(w)
-		return w.diff.SetSources(a, srcs, idx, true)
+		return a.OpenChanges(t.cur.Ref+": "+t.cur.Message, nil, srcs, idx, nil)
 	}
 	return t.diff.SetSources(a, srcs, idx, false)
 }
@@ -256,6 +259,7 @@ func (t *StashTab) menu(a *App, x, y int) {
 		{Label: "Apply Stash and Reinstate Index", Disabled: none, Do: func(a *App) tea.Cmd { return t.apply(a, false, true) }},
 		{Label: "Pop Stash", Hint: "p", Disabled: none, Do: func(a *App) tea.Cmd { return t.apply(a, true, false) }},
 		{Label: "Unstash as Branch…", Hint: "B", Disabled: none, Do: func(a *App) tea.Cmd { t.asBranch(a); return nil }},
+		{Label: "Jump to Source", Hint: "F4", Disabled: t.SelectedPath() == "", Do: func(a *App) tea.Cmd { return a.JumpToSource(t.SelectedPath(), 0) }},
 		MenuSep(),
 		{Label: "Drop Stash", Hint: "⌦", Disabled: none, Do: func(a *App) tea.Cmd { t.drop(a); return nil }},
 		{Label: "Clear All Stashes…", Disabled: none, Do: func(a *App) tea.Cmd {
@@ -273,7 +277,7 @@ func (t *StashTab) menu(a *App, x, y int) {
 }
 
 func (t *StashTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
-	switch k.String() {
+	switch keyName(k) {
 	case "tab":
 		t.setFocus((t.focus + 1) % 3)
 		return nil, true
@@ -290,8 +294,11 @@ func (t *StashTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		if cmd, ok := t.files.Key(a, k); ok {
 			return cmd, true
 		}
+		if cmd, ok := fileKey(a, keyName(k), t.SelectedPath(), t.fileDiff, func() { t.fileMenu(a, -1, -1) }); ok {
+			return cmd, true
+		}
 	case sfDiff:
-		if k.String() == "esc" {
+		if keyName(k) == "esc" {
 			t.setFocus(sfFiles)
 			return nil, true
 		}
@@ -299,18 +306,22 @@ func (t *StashTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 			return cmd, true
 		}
 	}
-	switch k.String() {
+	switch keyName(k) {
+	case "f4", "e":
+		if p := t.SelectedPath(); p != "" {
+			return a.JumpToSource(p, 0), true
+		}
 	case "a":
 		return t.apply(a, false, false), true
 	case "p":
 		return t.apply(a, true, false), true
-	case "delete", "D", "backspace":
+	case "delete", "D", "backspace", "ctrl+backspace":
 		t.drop(a)
 	case "B":
 		t.asBranch(a)
 	case "z":
 		OpenStashDialog(a, nil)
-	case ".", "shift+f10":
+	case ".", "shift+f10", "alt+enter":
 		t.menu(a, -1, -1)
 	default:
 		return nil, false
@@ -335,28 +346,11 @@ func (t *StashTab) Draw(a *App, v View) {
 		return nil
 	})
 	left.HLine(0, listH, split, '─', Style{Fg: th.Border, Bg: th.Bg})
-	tb := left.Sub(0, listH+1, split, 1)
-	tb.Fill(Style{Bg: th.Bg})
-	x := 1
-	tool := func(icon, tip string, fn func() tea.Cmd) {
-		tb.Text(x, 0, icon, Style{Fg: th.Fg, Bg: th.Bg})
-		a.Hit(Rect{tb.Abs().X + x, tb.Abs().Y, Width(icon), 1}, func(m Mouse) tea.Cmd {
-			if m.LeftPress() {
-				return fn()
-			}
-			return nil
-		})
-		x += Width(icon) + 2
+	label := ""
+	if t.cur != nil {
+		label = plural(len(t.curFiles), "file")
 	}
-	tool("⇱ Unstash", "", func() tea.Cmd { return t.apply(a, false, false) })
-	tool("▤", "", func() tea.Cmd {
-		a.Cfg.GroupByDir = !a.Cfg.GroupByDir
-		a.Cfg.Save()
-		t.files.SetRoots(changedFileNodes(a, "stash", t.curFiles))
-		return nil
-	})
-	tool("⌄", "", func() tea.Cmd { t.files.ExpandAll(); return nil })
-	tool("⌃", "", func() tea.Cmd { t.files.CollapseAll(); return nil })
+	drawFilesToolbar(a, left.Sub(0, listH+1, split, 1), label, t.files)
 	filesY := listH + 2
 	filesH := left.H() - filesY - 2
 	fv := left.Sub(0, filesY, split, filesH)
@@ -398,4 +392,18 @@ func (t *StashTab) Draw(a *App, v View) {
 		}
 		return nil
 	})
+}
+
+func (t *StashTab) regroup(a *App) {
+	if t.cur != nil {
+		t.files.SetRoots(changedFileNodes(a, "stash", t.curFiles))
+	}
+}
+
+func (t *StashTab) fileDiff(a *App) tea.Cmd { return t.preview(a, true) }
+
+func (t *StashTab) fileMenu(a *App, x, y int) {
+	if p := t.SelectedPath(); p != "" {
+		showFileMenu(a, fileItems(a, p, t.fileDiff), x, y)
+	}
 }

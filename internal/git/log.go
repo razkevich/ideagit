@@ -366,3 +366,41 @@ func (r *Repo) Outgoing(target string) ([]*Commit, error) {
 	}
 	return parseLog(out), nil
 }
+
+// PRTemplate suggests a pull request title and body from the commits on HEAD that
+// aren't on base: a single commit gives its subject and body, several give a list.
+func (r *Repo) PRTemplate(base string) (string, string) {
+	from := base
+	if _, err := r.RevParse(from); err != nil {
+		from = r.GitHubRemoteBranch(base)
+	}
+	out, err := r.Read("log", "--reverse", "--format=%s%x1f%b%x1e", from+"..HEAD")
+	if err != nil {
+		return "", ""
+	}
+	var subjects, bodies []string
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimSpace(rec)
+		if rec == "" {
+			continue
+		}
+		s, b, _ := strings.Cut(rec, "\x1f")
+		subjects = append(subjects, strings.TrimSpace(s))
+		bodies = append(bodies, strings.TrimSpace(b))
+	}
+	switch len(subjects) {
+	case 0:
+		return "", ""
+	case 1:
+		return subjects[0], bodies[0]
+	}
+	var b strings.Builder
+	for _, s := range subjects {
+		b.WriteString("- " + s + "\n")
+	}
+	return subjects[len(subjects)-1], b.String()
+}
+
+func (r *Repo) GitHubRemoteBranch(branch string) string {
+	return r.GitHubRemote() + "/" + branch
+}

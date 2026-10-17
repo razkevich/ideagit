@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/muesli/termenv v0.16.0
+	github.com/neovim/go-client v1.2.1
 )
 
 require (

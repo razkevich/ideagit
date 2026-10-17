@@ -68,7 +68,7 @@ func (f *CheckField) Draw(a *App, v View, focused bool, d *Dialog) {
 	_ = before
 }
 func (f *CheckField) Key(a *App, k tea.KeyMsg) bool {
-	if k.String() == " " {
+	if keyName(k) == " " {
 		*f.Val = !*f.Val
 		if f.OnChange != nil {
 			f.OnChange(a, *f.Val)
@@ -117,7 +117,7 @@ func (f *RadioField) Draw(a *App, v View, focused bool, d *Dialog) {
 	}
 }
 func (f *RadioField) Key(_ *App, k tea.KeyMsg) bool {
-	switch k.String() {
+	switch keyName(k) {
 	case "up", "left", "k":
 		*f.Sel = (*f.Sel + len(f.Options) - 1) % len(f.Options)
 		return true
@@ -131,8 +131,11 @@ func (f *RadioField) Key(_ *App, k tea.KeyMsg) bool {
 type ListField struct {
 	Lines []string
 	Fgs   []Color
-	H     int
-	top   int
+	// Icons/IconFgs, when set, prefix each line (file icons, like the trees).
+	Icons   []string
+	IconFgs []Color
+	H       int
+	top     int
 }
 
 func (f *ListField) Height() int     { return min(f.H, max(1, len(f.Lines))) }
@@ -145,7 +148,15 @@ func (f *ListField) Draw(a *App, v View, _ bool, _ *Dialog) {
 		if f.top+i < len(f.Fgs) && f.Fgs[f.top+i] != NoColor {
 			fg = f.Fgs[f.top+i]
 		}
-		v.TextFit(1, i, f.Lines[f.top+i], v.W()-2, Style{Fg: fg, Bg: th.Bg})
+		x := 1
+		if f.top+i < len(f.Icons) && f.Icons[f.top+i] != "" {
+			ifg := th.Dim
+			if f.top+i < len(f.IconFgs) && f.IconFgs[f.top+i] != NoColor {
+				ifg = f.IconFgs[f.top+i]
+			}
+			x = v.Text(x, i, f.Icons[f.top+i], Style{Fg: ifg, Bg: th.Bg}) + 1
+		}
+		v.TextFit(x, i, f.Lines[f.top+i], v.W()-x-1, Style{Fg: fg, Bg: th.Bg})
 	}
 	if len(f.Lines) > v.H() {
 		DrawScrollbar(a, v.Sub(v.W()-1, 0, 1, v.H()), f.top, v.H(), len(f.Lines), func(t int) { f.top = t })
@@ -265,11 +276,11 @@ func (d *Dialog) Key(a *App, k tea.KeyMsg) tea.Cmd {
 
 func (d *Dialog) key(a *App, k tea.KeyMsg) tea.Cmd {
 	n := d.focusables()
-	if wt, ok := d.focusedField().(interface{ WantsTab() bool }); ok && wt.WantsTab() && k.String() == "tab" {
+	if wt, ok := d.focusedField().(interface{ WantsTab() bool }); ok && wt.WantsTab() && keyName(k) == "tab" {
 		d.focusedField().Key(a, k)
 		return nil
 	}
-	switch k.String() {
+	switch keyName(k) {
 	case "esc":
 		a.Pop(d)
 		if d.OnCancel != nil {
@@ -277,7 +288,7 @@ func (d *Dialog) key(a *App, k tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "tab", "down":
-		if k.String() == "down" {
+		if keyName(k) == "down" {
 			if _, ok := d.focusedField().(*RadioField); ok {
 				break
 			}
@@ -285,7 +296,7 @@ func (d *Dialog) key(a *App, k tea.KeyMsg) tea.Cmd {
 		d.focus = (d.focus + 1) % n
 		return nil
 	case "shift+tab", "up":
-		if k.String() == "up" {
+		if keyName(k) == "up" {
 			if _, ok := d.focusedField().(*RadioField); ok {
 				break
 			}
@@ -300,7 +311,7 @@ func (d *Dialog) key(a *App, k tea.KeyMsg) tea.Cmd {
 	case "left", "right":
 		if b := d.focusedButton(); b >= 0 {
 			nf := n - len(d.Buttons)
-			if k.String() == "left" {
+			if keyName(k) == "left" {
 				d.focus = nf + (b+len(d.Buttons)-1)%len(d.Buttons)
 			} else {
 				d.focus = nf + (b+1)%len(d.Buttons)
@@ -347,7 +358,7 @@ func (d *Dialog) Draw(a *App, screen View) {
 	v := screen.Sub(x, y, w, h)
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
-	v.Box(Style{Fg: th.Border, Bg: bg}, d.Title, Style{Fg: th.Fg, Bg: bg, Bold: true})
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, d.Title, Style{Fg: th.Fg, Bg: bg, Bold: true})
 	row := 2
 	fi := 0
 	for _, f := range d.Fields {

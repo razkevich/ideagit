@@ -8,7 +8,8 @@ T=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$T"; rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 go build -o "$T/ideagit" "$ROOT"
-export HOME="$T/home" IDEAGIT_THEME=dark
+# Icons need a Nerd Font, which the SVG viewer won't have.
+export HOME="$T/home" IDEAGIT_THEME=dark TERM_PROGRAM=screenshot TERM=xterm-256color
 mkdir -p "$HOME"
 
 R="$HOME/code/acme-api"
@@ -179,3 +180,6 @@ shot worktrees 0 "W"
 shot branches 0 "b"
 shot stash 2 ""
 shot diff 0 "down enter"
+if command -v nvim >/dev/null; then
+  shot editor 0 "alt+1 esc down e wait:800"
+fi

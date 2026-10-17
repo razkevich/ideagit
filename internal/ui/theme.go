@@ -15,12 +15,14 @@ type Theme struct {
 	Dark bool
 
 	Bg, PanelBg, HeaderBg, Fg, Dim, Faint, Border Color
-	Sel, SelInactive, Hover, Accent, Link         Color
-	TabSelBg, TabSelBorder                        Color
-	ButtonBg, ButtonFg, ButtonPrimary, InputBg    Color
-	InputBorder, InputFocus                       Color
-	Error, Warning, Success                       Color
-	UnversionedRowBg                              Color
+	// Frame is the title bar, status bar and the gaps between panels ("islands").
+	Frame, PopupBorder, ToolbarBg              Color
+	Sel, SelInactive, Hover, Accent, Link      Color
+	TabSelBg, TabSelBorder                     Color
+	ButtonBg, ButtonFg, ButtonPrimary, InputBg Color
+	InputBorder, InputFocus                    Color
+	Error, Warning, Success                    Color
+	UnversionedRowBg                           Color
 
 	Modified, Added, Deleted, Unversioned, Conflict, Ignored Color
 
@@ -33,59 +35,65 @@ type Theme struct {
 	SynKeyword, SynString, SynNumber, SynComment, SynFunc, SynType, SynAttr, SynTag, SynConst, SynPunct Color
 }
 
+// DarkTheme follows IntelliJ's New UI "Islands Dark": panels are #191A1C islands on a
+// #26282C frame (title bar, status bar and the gaps between panels). Values were sampled
+// from IDE screenshots and converted from Display P3 to sRGB.
 func DarkTheme() *Theme {
 	return &Theme{
 		Dark:             true,
-		Bg:               Hex("#1E1F22"),
-		PanelBg:          Hex("#1E1F22"),
+		Bg:               Hex("#191A1C"),
+		PanelBg:          Hex("#191A1C"),
+		Frame:            Hex("#26282C"),
 		HeaderBg:         Hex("#2B2D30"),
 		Fg:               Hex("#DFE1E5"),
-		Dim:              Hex("#868A91"),
-		Faint:            Hex("#5A5D63"),
-		Border:           Hex("#393B40"),
-		Sel:              Hex("#2E436E"),
-		SelInactive:      Hex("#393B40"),
-		Hover:            Hex("#2B2D30"),
+		Dim:              Hex("#7B7F86"),
+		Faint:            Hex("#50555F"),
+		Border:           Hex("#26282C"),
+		PopupBorder:      Hex("#393B40"),
+		Sel:              Hex("#2B4371"),
+		SelInactive:      Hex("#2E3034"),
+		Hover:            Hex("#212226"),
 		Accent:           Hex("#3574F0"),
-		Link:             Hex("#548AF7"),
-		TabSelBg:         Hex("#25324D"),
-		TabSelBorder:     Hex("#3574F0"),
-		ButtonBg:         Hex("#2B2D30"),
+		Link:             Hex("#70A1FE"),
+		TabSelBg:         Hex("#233658"),
+		TabSelBorder:     Hex("#2F4F8D"),
+		ButtonBg:         Hex("#191A1C"),
 		ButtonFg:         Hex("#DFE1E5"),
-		ButtonPrimary:    Hex("#3574F0"),
-		InputBg:          Hex("#1E1F22"),
-		InputBorder:      Hex("#4E5157"),
+		ButtonPrimary:    Hex("#3771E1"),
+		InputBg:          Hex("#191A1C"),
+		InputBorder:      Hex("#41434A"),
 		InputFocus:       Hex("#3574F0"),
 		Error:            Hex("#F75464"),
 		Warning:          Hex("#F2C55C"),
 		Success:          Hex("#5FB865"),
-		UnversionedRowBg: Hex("#2A2223"),
-		Modified:         Hex("#6CA0F5"),
+		UnversionedRowBg: Hex("#291F1B"),
+		Modified:         Hex("#72B1FF"),
 		Added:            Hex("#73BD79"),
-		Deleted:          Hex("#868A91"),
-		Unversioned:      Hex("#E07A6E"),
+		Deleted:          Hex("#7B7F86"),
+		Unversioned:      Hex("#FE9B95"),
 		Conflict:         Hex("#E55765"),
 		Ignored:          Hex("#A8A35A"),
-		RefHead:          Hex("#E2C08D"),
-		RefLocal:         Hex("#8DB87A"),
-		RefRemote:        Hex("#B48EAD"),
-		RefTag:           Hex("#9DA0A8"),
+		RefHead:          Hex("#F2C55C"),
+		RefLocal:         Hex("#5FB865"),
+		RefRemote:        Hex("#BC8EF5"),
+		RefTag:           Hex("#7B7F86"),
 		Graph: []Color{
-			Hex("#C9A04B"), Hex("#C25272"), Hex("#5FA35F"), Hex("#4F94CD"),
-			Hex("#A777C9"), Hex("#CF8350"), Hex("#4DB3B3"), Hex("#B8B84A"),
-			Hex("#D06B9F"), Hex("#7A8CD6"),
+			Hex("#B08841"), Hex("#A64169"), Hex("#4BA53F"), Hex("#AFA343"),
+			Hex("#5C9BD1"), Hex("#BC8EF5"), Hex("#D97D4C"), Hex("#4CB5A8"),
+			Hex("#C9649C"), Hex("#7A8CD6"),
 		},
-		DiffMod:       Hex("#303C4F"),
-		DiffModWord:   Hex("#43577A"),
+		DiffMod:       Hex("#263451"),
+		DiffModWord:   Hex("#36507D"),
 		DiffIns:       Hex("#294436"),
-		DiffInsWord:   Hex("#3B6B4C"),
-		DiffDel:       Hex("#3E4042"),
-		DiffDelWord:   Hex("#5A5D60"),
+		DiffInsWord:   Hex("#3A6249"),
+		DiffDel:       Hex("#2C2D2E"),
+		DiffDelWord:   Hex("#46484B"),
 		DiffConflict:  Hex("#5B3A35"),
-		DiffGutterNum: Hex("#5A5D63"),
-		DiffFold:      Hex("#2B2D30"),
-		ScrollThumb:   Hex("#4E5157"),
-		ScrollTrack:   Hex("#1E1F22"),
+		DiffGutterNum: Hex("#50555F"),
+		DiffFold:      Hex("#212326"),
+		ScrollThumb:   Hex("#46484C"),
+		ScrollTrack:   Hex("#191A1C"),
+		ToolbarBg:     Hex("#212326"),
 		SynKeyword:    Hex("#CF8E6D"),
 		SynString:     Hex("#6AAB73"),
 		SynNumber:     Hex("#2AACB8"),
@@ -104,6 +112,7 @@ func LightTheme() *Theme {
 	*t = Theme{
 		Dark: false, Bg: Hex("#FFFFFF"), PanelBg: Hex("#FFFFFF"), HeaderBg: Hex("#F7F8FA"),
 		Fg: Hex("#000000"), Dim: Hex("#818594"), Faint: Hex("#A8ADBD"), Border: Hex("#EBECF0"),
+		Frame: Hex("#F2F3F5"), PopupBorder: Hex("#DFE1E5"), ToolbarBg: Hex("#F7F8FA"),
 		Sel: Hex("#D5E1FF"), SelInactive: Hex("#DFE1E5"), Hover: Hex("#F0F1F3"), Accent: Hex("#3574F0"), Link: Hex("#2F5EB9"),
 		TabSelBg: Hex("#EDF3FF"), TabSelBorder: Hex("#3574F0"),
 		ButtonBg: Hex("#FFFFFF"), ButtonFg: Hex("#000000"), ButtonPrimary: Hex("#3574F0"), InputBg: Hex("#FFFFFF"),
@@ -198,11 +207,23 @@ type Config struct {
 	BranchesWidth     int           `json:"branchesWidth"`
 	ConsoleHidden     bool          `json:"consoleHidden"`
 	RecentProjects    []string      `json:"recentProjects"`
+	PRFilter          PRFilter      `json:"prFilter"`
+	// Favorites maps a repository root to its starred branches.
+	Favorites         map[string][]string `json:"favoriteBranches,omitempty"`
+	ShowProject       bool                `json:"showProject"`
+	ProjectAutoscroll bool                `json:"projectAlwaysSelectOpenedFile"`
+	ProjectHideDots   bool                `json:"projectHideDotFiles"`
+	ProjectOpenFiles  bool                `json:"projectViewOpenFiles"`
+	Icons             string              `json:"icons"`
+	ProjectWidth      int                 `json:"projectWidth"`
+	EditorSplit       float64             `json:"editorSplit"`
+	HideGitWindow     bool                `json:"hideGitWindow"`
 	path              string
 }
 
 type LogTabState struct {
-	Filter git.LogFilter `json:"filter"`
+	Filter   git.LogFilter `json:"filter"`
+	Selected string        `json:"selected,omitempty"`
 }
 
 func LoadConfig() *Config {

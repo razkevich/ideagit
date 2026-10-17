@@ -24,9 +24,10 @@ type Repo struct {
 	GitDir string
 	Name   string
 
-	mu       sync.Mutex
-	console  []ConsoleEntry
-	mainRoot string
+	mu           sync.Mutex
+	console      []ConsoleEntry
+	consoleTotal int
+	mainRoot     string
 }
 
 func Open(dir string) (*Repo, error) {
@@ -78,6 +79,7 @@ func (r *Repo) run(o runOpts, args ...string) (string, error) {
 		text := strings.TrimRight(stdout.String()+stderr.String(), "\n")
 		r.mu.Lock()
 		r.console = append(r.console, ConsoleEntry{Time: time.Now(), Cmd: "git " + strings.Join(args, " "), Output: text, Failed: err != nil})
+		r.consoleTotal++
 		if len(r.console) > 2000 {
 			r.console = r.console[len(r.console)-2000:]
 		}
@@ -110,10 +112,17 @@ func (r *Repo) Console() []ConsoleEntry {
 	return append([]ConsoleEntry(nil), r.console...)
 }
 
-func (r *Repo) ConsoleLen() int {
+// ConsoleSince returns entries logged after the first seen ones, and the new total.
+// Old entries are trimmed, so seen counts everything ever logged.
+func (r *Repo) ConsoleSince(seen int) ([]ConsoleEntry, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.console)
+	first := r.consoleTotal - len(r.console)
+	from := max(0, seen-first)
+	if from >= len(r.console) {
+		return nil, r.consoleTotal
+	}
+	return append([]ConsoleEntry(nil), r.console[from:]...), r.consoleTotal
 }
 
 func (r *Repo) Abs(path string) string { return filepath.Join(r.Root, filepath.FromSlash(path)) }
@@ -186,4 +195,15 @@ func (r *Repo) HasHooks() bool {
 		}
 	}
 	return false
+}
+
+// LogExternal records a non-git command (gh) in the Console.
+func (r *Repo) LogExternal(cmd, output string, failed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.console = append(r.console, ConsoleEntry{Time: time.Now(), Cmd: cmd, Output: output, Failed: failed})
+	r.consoleTotal++
+	if len(r.console) > 2000 {
+		r.console = r.console[len(r.console)-2000:]
+	}
 }

@@ -14,8 +14,8 @@ func (a *App) OpenBranches() {
 	th := a.Th
 	cur := a.CurrentBranch()
 	items := []MenuItem{
-		{Label: "Update Project…", Icon: "⟳", Hint: "^T", Do: func(a *App) tea.Cmd { return a.OpenUpdate() }},
-		{Label: "Commit…", Icon: "✓", Hint: "^K", Do: func(a *App) tea.Cmd { return a.OpenCommit(nil) }},
+		{Label: "Update Project…", Icon: "⟳", Hint: "ctrl+t", Do: func(a *App) tea.Cmd { return a.OpenUpdate() }},
+		{Label: "Commit…", Icon: "✓", Hint: "ctrl+k", Do: func(a *App) tea.Cmd { return a.OpenCommit(nil) }},
 		{Label: "Push…", Icon: "⇡", Hint: "P", Do: func(a *App) tea.Cmd { return a.OpenPush() }},
 		{Label: "Fetch", Icon: "⇣", Hint: "F", Do: func(a *App) tea.Cmd {
 			return a.Op("Fetch", a.Repo.Fetch, func(a *App) tea.Cmd { a.Notify("Fetch successful", ""); return nil })
@@ -33,11 +33,9 @@ func (a *App) OpenBranches() {
 		}},
 	}
 	refItem := func(r git.Ref) MenuItem {
-		icon, fg := "◇", th.Dim
-		if r.IsHead {
-			icon, fg = "◆", th.RefHead
-		} else if isFavorite(r.Name) {
-			icon, fg = "★", th.RefHead
+		icon, fg := a.branchIcon(r)
+		if icon == "" {
+			icon, fg = "◇", th.Dim
 		}
 		hint := aheadBehind(r.Ahead, r.Behind)
 		if r.Kind == git.LocalBranch && r.Upstream != "" && hint == "" {
@@ -62,9 +60,11 @@ func (a *App) OpenBranches() {
 		}
 	}
 	items = append(items, MenuHeader("Local"))
-	for _, r := range a.Refs {
-		if r.Kind == git.LocalBranch {
-			items = append(items, refItem(r))
+	for _, fav := range []bool{true, false} {
+		for _, r := range a.Refs {
+			if r.Kind == git.LocalBranch && a.isFavorite(r.Name) == fav {
+				items = append(items, refItem(r))
+			}
 		}
 	}
 	var remote, tags []MenuItem
@@ -84,11 +84,7 @@ func (a *App) OpenBranches() {
 		items = append(items, MenuHeader("Tags"))
 		items = append(items, tags...)
 	}
-	title := "Git Branches"
-	if cur != "" {
-		title = "Git Branches · " + cur
-	}
-	m := NewMenu(title, items)
+	m := NewMenu("Git Branches", items)
 	m.MinWidth = 52
 	a.Push(m)
 }
@@ -102,6 +98,10 @@ func BranchActions(a *App, r git.Ref) []MenuItem {
 	}
 	isCur := r.Kind == git.LocalBranch && r.Name == cur
 	repo := a.Repo
+	favLabel := "Mark as Favorite"
+	if a.isFavorite(r.Name) {
+		favLabel = "Unmark as Favorite"
+	}
 	var items []MenuItem
 	switch r.Kind {
 	case git.LocalBranch, git.Tag:
@@ -142,7 +142,7 @@ func BranchActions(a *App, r git.Ref) []MenuItem {
 	if r.Kind == git.LocalBranch {
 		items = append(items, MenuSep())
 		if isCur {
-			items = append(items, MenuItem{Label: "Update", Hint: "^T", Do: func(a *App) tea.Cmd { return a.OpenUpdate() }})
+			items = append(items, MenuItem{Label: "Update", Hint: "ctrl+t", Do: func(a *App) tea.Cmd { return a.OpenUpdate() }})
 		} else {
 			items = append(items, MenuItem{Label: "Update", Disabled: r.Upstream == "", Do: func(a *App) tea.Cmd {
 				return a.Op("Update "+r.Name, func() error { return repo.UpdateBranch(r.Name, r.Upstream) }, nil)
@@ -171,6 +171,9 @@ func BranchActions(a *App, r git.Ref) []MenuItem {
 			}))
 			return nil
 		}})
+	}
+	if r.Kind != git.Tag {
+		items = append(items, MenuSep(), MenuItem{Label: favLabel, Do: func(a *App) tea.Cmd { a.toggleFavorite(r.Name); return nil }})
 	}
 	if r.Kind == git.Tag {
 		items = append(items, MenuSep(), MenuItem{Label: "Delete Tag", Do: func(a *App) tea.Cmd {
@@ -299,7 +302,7 @@ func (f *areaField) Draw(a *App, v View, focused bool, d *Dialog) {
 	f.ta.Draw(a, v)
 }
 func (f *areaField) Key(a *App, k tea.KeyMsg) bool {
-	if k.String() == "enter" {
+	if keyName(k) == "enter" {
 		return false
 	}
 	return f.ta.Key(k)
@@ -319,13 +322,27 @@ func OpenCompare(a *App, rev, label string) tea.Cmd {
 				a.Notify("No differences", "Working tree matches "+label)
 				return nil
 			}
-			var srcs []DiffSource
-			for _, f := range files {
-				srcs = append(srcs, compareSource(repo, rev, label, f))
-			}
-			w := NewDiffWindow(srcs[0].Path)
-			a.Push(w)
-			return w.diff.SetSources(a, srcs, 0, true)
+			return a.openCompareWindow(rev, label, files, false)
 		}
+	})
+}
+
+func (a *App) openCompareWindow(rev, label string, files []git.ChangedFile, swapped bool) tea.Cmd {
+	repo := a.Repo
+	var srcs []DiffSource
+	for _, f := range files {
+		if swapped {
+			srcs = append(srcs, compareSourceReversed(repo, rev, label, f))
+		} else {
+			srcs = append(srcs, compareSource(repo, rev, label, f))
+		}
+	}
+	cur := firstNonEmpty(a.CurrentBranch(), a.HeadLabel())
+	header := []headerPart{{"Difference between files in ", false}, {label, true}, {" and current working tree on ", false}, {cur, true}, {":", false}}
+	if swapped {
+		header = []headerPart{{"Difference between files in current working tree on ", false}, {cur, true}, {" and ", false}, {label, true}, {":", false}}
+	}
+	return a.OpenChanges("Changes Between "+label+" and Working Tree", header, srcs, 0, func(a *App) tea.Cmd {
+		return a.openCompareWindow(rev, label, files, !swapped)
 	})
 }

@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,8 +45,32 @@ func TestMergeWithBranchOffMerge(t *testing.T) {
 		{Hash: "base"},
 	}
 	got := render(Layout(cs))
-	want := "●\n│ ●\n│ ●\n●─┴─╮\n●   │\n│   ●\n●───╯\n"
+	want := "●\n│ ●\n│ ●\n●─┴─╮\n● ╭─╯\n│ ●\n●─╯\n"
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestLongEdgesBecomeArrowStubs(t *testing.T) {
+	// tip's parent is far down main; the edge must not hold a lane in between.
+	cs := []*git.Commit{{Hash: "tip", Parents: []string{"base"}}}
+	for i := 0; i < LongEdge+5; i++ {
+		cs = append(cs, &git.Commit{Hash: fmt.Sprint("m", i), Parents: []string{fmt.Sprint("m", i+1)}})
+	}
+	cs = append(cs, &git.Commit{Hash: fmt.Sprint("m", LongEdge+5), Parents: []string{"base"}}, &git.Commit{Hash: "base"})
+	lines := strings.Split(strings.TrimSuffix(render(Layout(cs)), "\n"), "\n")
+	if lines[0] != "●" || lines[1] != "↓ ●" || lines[2] != "●─╯" || lines[3] != "●" {
+		t.Fatalf("child side:\n%s", strings.Join(lines[:4], "\n"))
+	}
+	n := len(lines)
+	if lines[n-2] != "● ↑" || lines[n-1] != "●─╯" {
+		t.Fatalf("parent side:\n%s", strings.Join(lines[n-4:], "\n"))
+	}
+}
+
+func TestEdgeToUnloadedParentIsCut(t *testing.T) {
+	cs := []*git.Commit{{Hash: "a", Parents: []string{"gone"}}, {Hash: "b", Parents: []string{"c"}}, {Hash: "c"}}
+	if got := render(Layout(cs)); got != "●\n↓ ●\n●─╯\n" {
+		t.Fatalf("got\n%s", got)
 	}
 }

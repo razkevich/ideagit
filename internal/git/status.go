@@ -144,12 +144,16 @@ func parseBranchHeader(st *Status, f string) {
 func newChange(xy, path, orig string) FileStatus {
 	c := FileStatus{Path: path, OrigPath: orig, X: xy[0], Y: xy[1]}
 	switch {
+	case c.X == 'C':
+		// A copy adds a file; the source stays, so it must not be treated as a rename.
+		c.Kind = Added
+		c.OrigPath = ""
+	case c.X == 'R':
+		c.Kind = Renamed
 	case c.X == 'A':
 		c.Kind = Added
 	case c.X == 'D' || c.Y == 'D':
 		c.Kind = Deleted
-	case c.X == 'R' || c.X == 'C':
-		c.Kind = Renamed
 	case c.X == 'T' || c.Y == 'T':
 		c.Kind = TypeChanged
 	default:
@@ -214,4 +218,21 @@ func (r *Repo) MergeMessage() string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// Files lists tracked and untracked (not ignored) files for Search Everywhere.
+func (r *Repo) Files() []string {
+	out, err := r.Read("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var res []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			res = append(res, p)
+		}
+	}
+	return res
 }

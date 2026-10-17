@@ -65,8 +65,10 @@ func (t *ShelfTab) OnData(a *App) {
 		n := &Node{ID: "s:" + s.Name, Label: s.Description, Extra: fmt.Sprintf("%s, %s", plural(len(s.Files), "file"), s.Date.Format("02/01/2006, 15:04")),
 			Check: NoCheck, Data: s, Collapsed: true}
 		for _, f := range s.Files {
-			n.Children = append(n.Children, &Node{ID: "f:" + s.Name + ":" + f.Path, Label: baseOf(f.Path), Extra: dirOf(f.Path),
-				LabelFg: th.KindColor(f.Kind), Check: NoCheck, Data: shelfFile{s, f}})
+			fn := &Node{ID: "f:" + s.Name + ":" + f.Path, Label: baseOf(f.Path), Extra: dirOf(f.Path),
+				LabelFg: th.KindColor(f.Kind), Check: NoCheck, Data: shelfFile{s, f}}
+			a.setFileIcon(fn, f.Path)
+			n.Children = append(n.Children, fn)
 		}
 		if s.Recycled || s.Deleted {
 			deleted = append(deleted, n)
@@ -124,9 +126,11 @@ func (t *ShelfTab) openDiff(a *App) tea.Cmd {
 	if len(srcs) == 0 {
 		return nil
 	}
-	w := NewDiffWindow(srcs[idx].Path)
-	a.Push(w)
-	return w.diff.SetSources(a, srcs, idx, true)
+	title := "Shelf"
+	if s := t.selectedShelf(); s != nil {
+		title = "Shelf: " + s.Description
+	}
+	return a.OpenChanges(title, nil, srcs, idx, nil)
 }
 
 func (t *ShelfTab) unshelve(a *App) {
@@ -175,7 +179,7 @@ func (t *ShelfTab) unshelve(a *App) {
 				a.CL.Save()
 			}
 			if len(res.Conflicts) > 0 {
-				a.Error("Unshelved with conflicts", "Conflict markers were written to:\n"+strings.Join(res.Conflicts, "\n"))
+				a.Error("Unshelved with conflicts", "These files changed since shelving; check them (conflict markers, or left as they were):\n"+strings.Join(res.Conflicts, "\n"))
 			} else {
 				a.Notify("Changes unshelved", s.Description)
 			}
@@ -209,6 +213,7 @@ func (t *ShelfTab) menu(a *App, x, y int) {
 	items := []MenuItem{
 		{Label: "Unshelve…", Hint: "u", Disabled: none, Do: func(a *App) tea.Cmd { t.unshelve(a); return nil }},
 		{Label: "Show Diff", Hint: "⏎", Disabled: none, Do: func(a *App) tea.Cmd { return t.openDiff(a) }},
+		{Label: "Jump to Source", Hint: "F4", Disabled: t.SelectedPath() == "", Do: func(a *App) tea.Cmd { return a.JumpToSource(t.SelectedPath(), 0) }},
 		{Label: "Rename…", Hint: "r", Disabled: none, Do: func(a *App) tea.Cmd { t.rename(a); return nil }},
 		MenuSep(),
 		{Label: "Restore", Hint: "R", Disabled: !recycled, Do: func(a *App) tea.Cmd {
@@ -237,13 +242,13 @@ func (t *ShelfTab) rename(a *App) {
 }
 
 func (t *ShelfTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
-	if k.String() == "tab" && t.preview {
+	if keyName(k) == "tab" && t.preview {
 		t.focusDiff = !t.focusDiff
 		t.tree.Focused, t.diff.Focused = !t.focusDiff, t.focusDiff
 		return nil, true
 	}
 	if t.focusDiff {
-		if k.String() == "esc" {
+		if keyName(k) == "esc" {
 			t.focusDiff = false
 			t.tree.Focused, t.diff.Focused = true, false
 			return nil, true
@@ -254,7 +259,11 @@ func (t *ShelfTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 	} else if cmd, ok := t.tree.Key(a, k); ok {
 		return cmd, true
 	}
-	switch k.String() {
+	switch keyName(k) {
+	case "f4", "e":
+		if p := t.SelectedPath(); p != "" {
+			return a.JumpToSource(p, 0), true
+		}
 	case "u", "ctrl+u":
 		t.unshelve(a)
 	case "v":
@@ -270,9 +279,9 @@ func (t *ShelfTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		if s := t.selectedShelf(); s != nil && (s.Recycled || s.Deleted) {
 			return a.Op("Restore shelf", func() error { return s.SetRecycled(a.Repo, false) }, nil), true
 		}
-	case "delete", "D", "backspace":
+	case "delete", "D", "backspace", "ctrl+backspace":
 		t.delete(a)
-	case ".", "shift+f10":
+	case ".", "shift+f10", "alt+enter":
 		t.menu(a, -1, -1)
 	default:
 		return nil, false
@@ -301,9 +310,12 @@ func (t *ShelfTab) Draw(a *App, v View) {
 	}
 	tool("⇱ Unshelve", false, func() tea.Cmd { t.unshelve(a); return nil })
 	tool("◉ Preview", t.preview, func() tea.Cmd { t.preview = !t.preview; return t.updatePreview(a) })
-	tool("⌄", false, func() tea.Cmd { t.tree.ExpandAll(); return nil })
-	tool("⌃", false, func() tea.Cmd { t.tree.CollapseAll(); return nil })
-	tb.TextRight(v.W()-1, 0, relHome(shelf.Dir(a.Repo)), Style{Fg: th.Faint, Bg: th.Bg})
+	tool("⊞", false, func() tea.Cmd { t.tree.ExpandAll(); return nil })
+	tool("⊟", false, func() tea.Cmd { t.tree.CollapseAll(); return nil })
+	// Only where it fits: the toolbar buttons come first.
+	if loc := TruncateLeft(relHome(shelf.Dir(a.Repo)), v.W()-x-2); v.W()-x-2 > 12 {
+		tb.TextRight(v.W()-1, 0, loc, Style{Fg: th.Faint, Bg: th.Bg})
+	}
 	body := v.Sub(0, 1, v.W(), v.H()-1)
 	if !t.preview {
 		t.tree.Draw(a, body)

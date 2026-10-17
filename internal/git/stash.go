@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -93,7 +94,20 @@ func (r *Repo) StashPush(message string, keepIndex, includeUntracked bool, paths
 	return err
 }
 
+// checkStash makes sure stash@{N} still is the stash the user picked; refs/stash is
+// shared by all worktrees, so another one may have pushed or dropped stashes meanwhile.
+func (r *Repo) checkStash(s Stash) error {
+	h, err := r.RevParse(s.Ref)
+	if err != nil || h != s.Hash {
+		return fmt.Errorf("the stash list changed (maybe from another worktree); refresh and try again")
+	}
+	return nil
+}
+
 func (r *Repo) StashApply(s Stash, pop, reinstateIndex bool) error {
+	if err := r.checkStash(s); err != nil {
+		return err
+	}
 	verb := "apply"
 	if pop {
 		verb = "pop"
@@ -107,6 +121,9 @@ func (r *Repo) StashApply(s Stash, pop, reinstateIndex bool) error {
 }
 
 func (r *Repo) StashDrop(s Stash) error {
+	if err := r.checkStash(s); err != nil {
+		return err
+	}
 	_, err := r.Exec("stash", "drop", s.Ref)
 	return err
 }
@@ -117,6 +134,9 @@ func (r *Repo) StashClear() error {
 }
 
 func (r *Repo) StashBranch(s Stash, branch string) error {
+	if err := r.checkStash(s); err != nil {
+		return err
+	}
 	_, err := r.Exec("stash", "branch", branch, s.Ref)
 	return err
 }

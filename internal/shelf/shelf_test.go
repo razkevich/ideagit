@@ -25,7 +25,7 @@ func TestShelveUnshelveRoundTrip(t *testing.T) {
 	run("commit", "-qm", "init")
 	repo, _ := git.Open(dir)
 	newContent := "line \"one\"\n\ttwo\\x\nthree\n"
-	s, err := Create(repo, "my shelf", []Source{
+	s, _, err := Create(repo, "my shelf", []Source{
 		{Path: "f.txt", Kind: git.Modified, Old: []byte("line \"one\"\n\ttwo\\x\n"), New: []byte(newContent)},
 		{Path: "n.txt", Kind: git.Untracked, New: []byte("new\n")},
 	})
@@ -52,5 +52,18 @@ func TestShelveUnshelveRoundTrip(t *testing.T) {
 	got, _ = os.ReadFile(dir + "/n.txt")
 	if string(got) != "new\n" {
 		t.Fatalf("new file %q", got)
+	}
+}
+
+func TestCreateReportsSkippedBinary(t *testing.T) {
+	dir := t.TempDir()
+	exec.Command("git", "-C", dir, "init", "-q").Run()
+	repo, _ := git.Open(dir)
+	_, skipped, err := Create(repo, "bin", []Source{
+		{Path: "img.bin", Kind: git.Untracked, New: []byte{0, 1, 2, 0}},
+		{Path: "t.txt", Kind: git.Untracked, New: []byte("x\n")},
+	})
+	if err != nil || len(skipped) != 1 || skipped[0] != "img.bin" {
+		t.Fatalf("skipped=%v err=%v", skipped, err)
 	}
 }

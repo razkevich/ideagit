@@ -44,7 +44,9 @@ type Menu struct {
 	rect       Rect
 	Footer     string
 	onClose    func(a *App)
-	shownSel   int
+	// Reload rebuilds the items, e.g. after a toggle or once async data arrives.
+	Reload   func(a *App) []MenuItem
+	shownSel int
 }
 
 func NewMenu(title string, items []MenuItem) *Menu {
@@ -64,6 +66,21 @@ func (m *Menu) Dismissable() bool { return true }
 func (m *Menu) SetItems(items []MenuItem) {
 	m.items = items
 	m.filter()
+}
+
+// refresh rebuilds the items, keeping the selected row.
+func (m *Menu) refresh(a *App) {
+	if m.Reload == nil {
+		return
+	}
+	sel, top := m.sel, m.top
+	m.SetItems(m.Reload(a))
+	if !m.Searchable && len(m.items) > 12 {
+		m.Searchable = true
+	}
+	if m.search.Value() == "" && sel < len(m.vis) {
+		m.sel, m.top = sel, top
+	}
 }
 
 func (m *Menu) filter() {
@@ -178,14 +195,15 @@ func (m *Menu) activate(a *App) tea.Cmd {
 
 func (m *Menu) openSub(a *App, it *MenuItem) {
 	sub := NewMenuAt(it.Label, it.Sub(a), m.rect.X+m.rect.W-1, m.rect.Y+1+(m.sel-m.top))
-	sub.Searchable = false
+	sub.Searchable = len(sub.items) > 12
+	sub.Reload = it.Sub
 	sub.parent = m
 	m.child = sub
 	a.Push(sub)
 }
 
 func (m *Menu) Key(a *App, k tea.KeyMsg) tea.Cmd {
-	switch k.String() {
+	switch keyName(k) {
 	case "esc":
 		if m.Searchable && m.search.Value() != "" {
 			m.search.SetValue("")
@@ -307,7 +325,7 @@ func (m *Menu) Draw(a *App, screen View) {
 	v := screen.Sub(x, y, w, h)
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
-	v.Box(Style{Fg: th.Border, Bg: bg}, "", Style{})
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, "", Style{})
 	row := 1
 	if m.Title != "" {
 		v.TextFit(2, row, m.Title, w-4, Style{Fg: th.Fg, Bg: bg, Bold: true})

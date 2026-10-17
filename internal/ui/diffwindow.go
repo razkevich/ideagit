@@ -14,14 +14,15 @@ type DiffWindow struct {
 func NewDiffWindow(title string) *DiffWindow {
 	d := NewDiffView()
 	d.Focused = true
+	d.HidePath = true
 	return &DiffWindow{title: title, diff: d}
 }
 
 func (w *DiffWindow) Hint() string { return w.diff.Hint() + " · esc close" }
 
 func (w *DiffWindow) Key(a *App, k tea.KeyMsg) tea.Cmd {
-	switch k.String() {
-	case "esc", "q", "ctrl+w":
+	switch keyName(k) {
+	case "esc", "q", "ctrl+w", "ctrl+f4":
 		a.Pop(w)
 		return nil
 	}

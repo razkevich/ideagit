@@ -6,16 +6,19 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/mattn/go-runewidth"
 
 	. "github.com/razkevich/ideagit/internal/canvas"
 	"github.com/razkevich/ideagit/internal/diff"
+	"github.com/razkevich/ideagit/internal/git"
 )
 
 type DiffSource struct {
-	Path       string
-	Header     string
-	LeftTitle  string
+	Path      string
+	Kind      git.ChangeKind
+	Header    string
+	LeftTitle string
+	// LeftPath is shown next to LeftTitle unless the diff window's title already has it.
+	LeftPath   string
 	RightTitle string
 	// LeftEditable/RightEditable mark the side that is the working-tree file.
 	LeftEditable  bool
@@ -59,6 +62,7 @@ type DiffView struct {
 	cur           int
 	Focused       bool
 	ShowToolbar   bool
+	HidePath      bool
 	height        int
 	wantBlock     int
 	nextFileArmed int
@@ -66,12 +70,14 @@ type DiffView struct {
 	// Partial commit support: Excluded[path][block] means "don't commit this chunk".
 	Partial  bool
 	Excluded map[string]map[int]bool
+	// Shown is the working-tree content each partial-commit diff was computed from.
+	Shown    map[string]string
 	OnToggle func(a *App)
 	OnChange func(a *App) tea.Cmd
 }
 
 func NewDiffView() *DiffView {
-	return &DiffView{ShowToolbar: true, foldsOpen: map[int]bool{}, Excluded: map[string]map[int]bool{}, wantBlock: -1}
+	return &DiffView{ShowToolbar: true, foldsOpen: map[int]bool{}, Excluded: map[string]map[int]bool{}, Shown: map[string]string{}, wantBlock: -1}
 }
 
 func (d *DiffView) Source() *DiffSource {
@@ -159,6 +165,13 @@ func (d *DiffView) reload(a *App, keepPos bool) tea.Cmd {
 			d.loading = false
 			d.err = err
 			d.res = res
+			if d.Partial && res != nil && !res.Binary && !res.TooLarge {
+				if prev, ok := d.Shown[src.Path]; ok && prev != string(diff.JoinLines(res.New, res.NewNoEOL)) {
+					// The file changed, so chunk numbers no longer mean the same chunks.
+					delete(d.Excluded, src.Path)
+				}
+				d.Shown[src.Path] = string(diff.JoinLines(res.New, res.NewNoEOL))
+			}
 			d.hlOld, d.hlNew = hlo, hln
 			d.wordOld, d.wordNew = wo, wn
 			if !keepPos {
@@ -338,8 +351,20 @@ func (d *DiffView) editable() (left, right bool) {
 func (d *DiffView) ApplyBlock(a *App, bi int) tea.Cmd {
 	s := d.Source()
 	le, re := d.editable()
-	if s == nil || (!le && !re) || bi < 0 || bi >= d.blocks() {
+	// In the commit dialog chunks are picked, not applied; editing would shift them.
+	if s == nil || d.Partial || (!le && !re) || bi < 0 || bi >= d.blocks() {
 		return nil
+	}
+	path := a.Repo.Abs(s.Path)
+	// The diff may be stale (another process edited the file since it was loaded);
+	// rebuilding the file from it would silently drop those edits.
+	shown := diff.JoinLines(d.res.New, d.res.NewNoEOL)
+	if le {
+		shown = diff.JoinLines(d.res.Old, d.res.OldNoEOL)
+	}
+	if cur, ok := a.Repo.ReadWorktree(s.Path); !ok || string(cur) != string(shown) {
+		a.Notify("File changed on disk", s.Path+" was modified since the diff was shown; reloaded, try again")
+		return d.reload(a, true)
 	}
 	var content []byte
 	if re {
@@ -347,7 +372,6 @@ func (d *DiffView) ApplyBlock(a *App, bi int) tea.Cmd {
 	} else {
 		content = d.res.ApplyToOld(bi)
 	}
-	path := a.Repo.Abs(s.Path)
 	mode := os.FileMode(0o644)
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
@@ -386,14 +410,14 @@ func (d *DiffView) chunkIncluded(bi int) bool {
 
 func (d *DiffView) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 	h := max(1, d.height)
-	switch k.String() {
+	switch keyName(k) {
 	case "up", "k":
 		d.top = max(0, d.top-1)
 	case "down", "j":
 		d.top = min(max(0, len(d.rows)-h), d.top+1)
-	case "pgup", "ctrl+u":
+	case "pgup":
 		d.top = max(0, d.top-h+1)
-	case "pgdown", "ctrl+d":
+	case "pgdown":
 		d.top = min(max(0, len(d.rows)-h), d.top+h-1)
 	case "home", "g":
 		d.top = 0
@@ -407,10 +431,12 @@ func (d *DiffView) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		return d.Next(a), true
 	case "f19", "shift+f7", "N":
 		return d.Prev(a), true
-	case "]", "alt+down":
+	case "]", "alt+right", "alt+down":
 		return d.SelectFile(a, d.idx+1, 0), true
-	case "[", "alt+up":
+	case "[", "alt+left", "alt+up":
 		return d.SelectFile(a, d.idx-1, 0), true
+	case "ctrl+shift+right", "ctrl+shift+left":
+		return d.ApplyBlock(a, d.cur), true
 	case "v":
 		a.Cfg.DiffUnified = !a.Cfg.DiffUnified
 		a.Cfg.Save()
@@ -429,14 +455,9 @@ func (d *DiffView) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		a.Cfg.NoWordHighlight = !a.Cfg.NoWordHighlight
 		a.Cfg.Save()
 		return d.reload(a, true), true
-	case "e", "f4":
-		if s := d.Source(); s != nil && (s.RightEditable || s.LeftEditable) {
-			return a.EditFile(s.Path, d.currentLine()), true
-		}
+	case "e", "f4", "ctrl+down":
 		if s := d.Source(); s != nil {
-			if _, err := os.Stat(a.Repo.Abs(s.Path)); err == nil {
-				return a.EditFile(s.Path, d.currentLine()), true
-			}
+			return a.JumpToSource(s.Path, d.currentLine()), true
 		}
 	case ">", "<", "a":
 		return d.ApplyBlock(a, d.cur), true
@@ -453,7 +474,7 @@ func (d *DiffView) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 }
 
 func (d *DiffView) Hint() string {
-	h := "F7/⇧F7 next/prev change · [ ] file · v view · c collapse · w whitespace · e edit"
+	h := "F7/⇧F7 next/prev change · [ ] file · v view · c collapse · w whitespace · F4 source"
 	if le, re := d.editable(); le || re {
 		h += " · a apply chunk"
 	}
@@ -461,6 +482,13 @@ func (d *DiffView) Hint() string {
 		h += " · space include chunk"
 	}
 	return h
+}
+
+func (d *DiffView) leftTitle(s *DiffSource) string {
+	if d.HidePath || s.LeftPath == "" {
+		return s.LeftTitle
+	}
+	return s.LeftTitle + "  " + s.LeftPath
 }
 
 func (d *DiffView) Draw(a *App, v View) {
@@ -480,10 +508,10 @@ func (d *DiffView) Draw(a *App, v View) {
 	header := v.Sub(0, y, v.W(), 1)
 	header.Fill(Style{Bg: th.Bg})
 	if uni {
-		header.TextFit(1, 0, s.LeftTitle+"  →  "+s.RightTitle, v.W()-2, Style{Fg: th.Fg, Bg: th.Bg})
+		header.TextFit(1, 0, d.leftTitle(s)+"  →  "+s.RightTitle, v.W()-2, Style{Fg: th.Fg, Bg: th.Bg})
 	} else {
 		half := (v.W() - 1) / 2
-		header.TextFit(1, 0, s.LeftTitle, half-2, Style{Fg: th.Fg, Bg: th.Bg})
+		header.TextFit(1, 0, d.leftTitle(s), half-2, Style{Fg: th.Fg, Bg: th.Bg})
 		header.TextFit(half+2, 0, s.RightTitle, v.W()-half-3, Style{Fg: th.Fg, Bg: th.Bg})
 	}
 	y++
@@ -569,7 +597,7 @@ func (d *DiffView) Draw(a *App, v View) {
 
 func (d *DiffView) drawToolbar(a *App, v View) {
 	th := a.Th
-	st := Style{Fg: th.Fg, Bg: th.HeaderBg}
+	st := Style{Fg: th.Fg, Bg: th.ToolbarBg}
 	v.Fill(st)
 	x := 1
 	btn := func(label string, enabled bool, fn func() tea.Cmd) {
@@ -639,7 +667,7 @@ func (d *DiffView) drawToolbar(a *App, v View) {
 		return nil
 	})
 	modeX := gx - 9
-	side := Style{Fg: th.Fg, Bg: th.HeaderBg}
+	side := Style{Fg: th.Fg, Bg: th.ToolbarBg}
 	uniSt := side
 	if a.Cfg.DiffUnified {
 		uniSt.Bg = th.TabSelBg
@@ -758,6 +786,8 @@ func (d *DiffView) drawSide(a *App, v View) {
 	rightW := v.W() - rightX
 	le, re := d.editable()
 	abs := v.Abs()
+	a.Selectable(Rect{abs.X + leftX, abs.Y, textW, v.H()}, true)
+	a.Selectable(Rect{abs.X + rightX, abs.Y, rightW, v.H()}, true)
 	for i := 0; i < v.H(); i++ {
 		ri := d.top + i
 		base := Style{Fg: th.Fg, Bg: th.Bg}
@@ -804,11 +834,11 @@ func (d *DiffView) drawSide(a *App, v View) {
 				bi := row.block
 				switch {
 				case d.Partial:
-					box := "[x]"
+					box := a.checkGlyph(Checked)
 					if !d.chunkIncluded(bi) {
-						box = "[ ]"
+						box = a.checkGlyph(Unchecked)
 					}
-					v.Text(midX, i, box, Style{Fg: th.Accent, Bg: th.Bg})
+					v.Text(midX+1, i, box, Style{Fg: th.Accent, Bg: th.Bg})
 					a.Hit(Rect{abs.X + midX, abs.Y + i, 3, 1}, func(m Mouse) tea.Cmd {
 						if m.LeftPress() {
 							d.toggleChunk(a, bi)
@@ -847,6 +877,7 @@ func (d *DiffView) drawUnified(a *App, v View) {
 	textX := 2*nw + 5
 	_, re := d.editable()
 	abs := v.Abs()
+	a.Selectable(Rect{abs.X + textX, abs.Y, v.W() - textX, v.H()}, true)
 	for i := 0; i < v.H(); i++ {
 		ri := d.top + i
 		if ri >= len(d.rows) {
@@ -887,11 +918,11 @@ func (d *DiffView) drawUnified(a *App, v View) {
 			bi := row.block
 			switch {
 			case d.Partial:
-				box := "[x]"
+				box := a.checkGlyph(Checked)
 				if !d.chunkIncluded(bi) {
-					box = "[ ]"
+					box = a.checkGlyph(Unchecked)
 				}
-				v.Text(2*nw+2, i, box, Style{Fg: th.Accent, Bg: th.Bg})
+				v.Text(2*nw+3, i, box, Style{Fg: th.Accent, Bg: th.Bg})
 				a.Hit(Rect{abs.X + 2*nw + 2, abs.Y + i, 3, 1}, func(m Mouse) tea.Cmd {
 					if m.LeftPress() {
 						d.toggleChunk(a, bi)
@@ -953,7 +984,7 @@ func (d *DiffView) drawText(v View, line string, toks []tokSpan, words []diff.Sp
 			}
 			continue
 		}
-		rw := runewidth.RuneWidth(r)
+		rw := RuneWidth(r)
 		if rw == 0 {
 			continue
 		}

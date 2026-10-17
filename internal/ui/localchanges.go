@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -52,7 +53,7 @@ func (l *LocalChanges) Hint() string {
 	if l.focusDiff {
 		return l.diff.Hint() + " · tab tree"
 	}
-	return "⏎ diff · ^K commit · ^Z rollback · a add · F6 move · s shelve · z stash · g group · p preview · . menu"
+	return "⏎ diff · F4 source · space stage · c commit · d rollback · F6 move · s shelve · z stash · g tree/list · v preview · x menu"
 }
 
 func (l *LocalChanges) SelectedPath() string {
@@ -223,8 +224,12 @@ func (l *LocalChanges) fileNode(a *App, f git.FileStatus, flat bool) *Node {
 			n.Right = "partially staged"
 		}
 	}
+	if !f.IsDir {
+		a.setFileIcon(n, f.Path)
+	}
 	if f.IsDir {
-		n.Icon = "▤"
+		n.Icon, _ = a.dirIcon(false)
+		n.IconOpen, _ = a.dirIcon(true)
 		n.IconFg = th.Unversioned
 		repo := a.Repo
 		dir := f.Path
@@ -232,8 +237,10 @@ func (l *LocalChanges) fileNode(a *App, f git.FileStatus, flat bool) *Node {
 			var kids []*Node
 			for _, p := range repo.UntrackedUnder(dir) {
 				rel := strings.TrimPrefix(p, dir+"/")
-				kids = append(kids, &Node{ID: "f:" + p, Label: baseOf(rel), Extra: dirOf(rel), LabelFg: th.Unversioned, Check: NoCheck,
-					Data: git.FileStatus{Path: p, Kind: git.Untracked, X: '?', Y: '?'}, RowBg: th.UnversionedRowBg})
+				kid := &Node{ID: "f:" + p, Label: baseOf(rel), Extra: dirOf(rel), LabelFg: th.Unversioned, Check: NoCheck,
+					Data: git.FileStatus{Path: p, Kind: git.Untracked, X: '?', Y: '?'}, RowBg: th.UnversionedRowBg}
+				a.setFileIcon(kid, p)
+				kids = append(kids, kid)
 			}
 			return kids
 		}
@@ -296,7 +303,9 @@ func groupByDir[T any](a *App, prefix string, items []T, leaf func(T) *Node, pat
 			}
 			kids := conv(sub, full)
 			count := countLeaves(kids)
-			res = append(res, &Node{ID: "d:" + prefix + ":" + full, Label: label, Icon: "▤", Extra: plural(count, "file"), Check: NoCheck, Children: kids})
+			icon, fg := a.dirIcon(false)
+			open, _ := a.dirIcon(true)
+			res = append(res, &Node{ID: "d:" + prefix + ":" + full, Label: label, Icon: icon, IconOpen: open, IconFg: fg, Extra: plural(count, "file"), Check: NoCheck, Children: kids})
 		}
 		res = append(res, d.files...)
 		return res
@@ -374,16 +383,11 @@ func (l *LocalChanges) openDiff(a *App) tea.Cmd {
 	if len(srcs) == 0 {
 		return nil
 	}
-	w := NewDiffWindow(srcs[idx].Path)
-	a.Push(w)
-	w.diff.OnChange = func(a *App) tea.Cmd {
-		if s := w.diff.Source(); s != nil {
-			w.title = s.Path
-			l.tree.SelectID("f:" + s.Path)
-		}
-		return nil
+	title := "Local Changes"
+	if cl := l.selectedChangelist(a); cl != nil {
+		title = cl.Name
 	}
-	return w.diff.SetSources(a, srcs, idx, true)
+	return a.OpenChanges(title, nil, srcs, idx, nil)
 }
 
 func (l *LocalChanges) selectedFiles() []git.FileStatus {
@@ -408,7 +412,7 @@ func (l *LocalChanges) selectedChangelist(a *App) *changelist.List {
 }
 
 func (l *LocalChanges) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
-	if k.String() == "tab" || k.String() == "shift+tab" {
+	if keyName(k) == "tab" || keyName(k) == "shift+tab" {
 		if !a.Cfg.HidePreview {
 			l.focusDiff = !l.focusDiff
 			l.tree.Focused = !l.focusDiff
@@ -417,7 +421,7 @@ func (l *LocalChanges) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		return nil, true
 	}
 	if l.focusDiff {
-		if k.String() == "esc" {
+		if keyName(k) == "esc" {
 			l.focusDiff = false
 			l.tree.Focused, l.diff.Focused = true, false
 			return nil, true
@@ -431,13 +435,15 @@ func (l *LocalChanges) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 			return cmd, true
 		}
 	}
-	switch k.String() {
+	switch keyName(k) {
 	case "ctrl+d", "o":
 		return l.openDiff(a), true
-	case "ctrl+z", "alt+z":
+	case "ctrl+alt+z", "ctrl+z", "alt+z", "d":
 		l.rollback(a)
+	case " ":
+		return l.toggleStage(a), true
 	case "a", "ctrl+alt+a":
-		return l.addToVCS(a), true
+		return l.stage(a), true
 	case "f6", "m":
 		l.moveToChangelist(a)
 	case "n":
@@ -446,15 +452,13 @@ func (l *LocalChanges) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		l.shelve(a)
 	case "z":
 		l.stash(a)
-	case "delete", "D":
+	case "delete", "D", "ctrl+backspace":
 		l.deleteFiles(a)
 	case "i":
 		return l.ignore(a), true
 	case "g":
-		a.Cfg.GroupByDir = !a.Cfg.GroupByDir
-		a.Cfg.Save()
-		l.rebuild(a)
-	case "p":
+		a.setGroupByDir(!a.Cfg.GroupByDir)
+	case "v":
 		a.Cfg.HidePreview = !a.Cfg.HidePreview
 		a.Cfg.Save()
 		if a.Cfg.HidePreview {
@@ -466,9 +470,9 @@ func (l *LocalChanges) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		if p := l.SelectedPath(); p != "" {
 			return a.OpenLog(git.LogFilter{Paths: []string{p}}), true
 		}
-	case "e", "f4":
+	case "e", "f4", "ctrl+down":
 		if p := l.SelectedPath(); p != "" {
-			return a.EditFile(p, 0), true
+			return a.JumpToSource(p, 0), true
 		}
 	case "y":
 		if p := l.SelectedPath(); p != "" {
@@ -498,10 +502,10 @@ func (l *LocalChanges) contextMenu(a *App, x, y int) {
 	}
 	none := len(files) == 0
 	items := []MenuItem{
-		{Label: "Commit Files…", Hint: "^K", Disabled: none || !hasTracked, Do: func(a *App) tea.Cmd { return a.OpenCommit(files) }},
-		{Label: "Rollback…", Hint: "^Z", Disabled: none, Do: func(a *App) tea.Cmd { l.rollback(a); return nil }},
+		{Label: "Commit Files…", Hint: "ctrl+k", Disabled: none || !hasTracked, Do: func(a *App) tea.Cmd { return a.OpenCommit(files) }},
+		{Label: "Rollback…", Hint: "ctrl+alt+z", Disabled: none, Do: func(a *App) tea.Cmd { l.rollback(a); return nil }},
 		{Label: "Show Diff", Hint: "⏎", Disabled: none, Do: func(a *App) tea.Cmd { return l.openDiff(a) }},
-		{Label: "Jump to Source", Hint: "F4", Disabled: none, Do: func(a *App) tea.Cmd { return a.EditFile(files[0].Path, 0) }},
+		{Label: "Jump to Source", Hint: "F4", Disabled: none, Do: func(a *App) tea.Cmd { return a.JumpToSource(files[0].Path, 0) }},
 		MenuSep(),
 	}
 	if hasConflict {
@@ -542,7 +546,8 @@ func (l *LocalChanges) contextMenu(a *App, x, y int) {
 		MenuItem{Label: "Shelve Changes…", Hint: "s", Disabled: !hasTracked && !hasUnv, Do: func(a *App) tea.Cmd { l.shelve(a); return nil }},
 		MenuItem{Label: "Stash Changes…", Hint: "z", Do: func(a *App) tea.Cmd { l.stash(a); return nil }},
 		MenuSep(),
-		MenuItem{Label: "Add to VCS", Hint: "a", Disabled: !hasUnv, Do: func(a *App) tea.Cmd { return l.addToVCS(a) }},
+		MenuItem{Label: "Add to VCS", Hint: "ctrl+alt+a", Disabled: !hasUnv, Do: func(a *App) tea.Cmd { return l.addToVCS(a) }},
+		MenuItem{Label: "Stage / Unstage", Hint: "space", Disabled: none, Do: func(a *App) tea.Cmd { return l.toggleStage(a) }},
 		MenuItem{Label: "Add to .gitignore", Hint: "i", Disabled: !hasUnv, Do: func(a *App) tea.Cmd { return l.ignore(a) }},
 		MenuItem{Label: "Delete…", Hint: "⌦", Disabled: none, Do: func(a *App) tea.Cmd { l.deleteFiles(a); return nil }},
 		MenuSep(),
@@ -553,12 +558,10 @@ func (l *LocalChanges) contextMenu(a *App, x, y int) {
 		MenuItem{Label: "Copy Path From Repository Root", Disabled: none, Do: func(a *App) tea.Cmd { return copyToClipboard(a, files[0].Path) }},
 		MenuSep(),
 		MenuItem{Label: "Group by Directory", Hint: "g", Checked: a.Cfg.GroupByDir, Do: func(a *App) tea.Cmd {
-			a.Cfg.GroupByDir = !a.Cfg.GroupByDir
-			a.Cfg.Save()
-			l.rebuild(a)
+			a.setGroupByDir(!a.Cfg.GroupByDir)
 			return nil
 		}},
-		MenuItem{Label: "Show Diff Preview", Hint: "p", Checked: !a.Cfg.HidePreview, Do: func(a *App) tea.Cmd {
+		MenuItem{Label: "Show Diff Preview", Hint: "v", Checked: !a.Cfg.HidePreview, Do: func(a *App) tea.Cmd {
 			a.Cfg.HidePreview = !a.Cfg.HidePreview
 			a.Cfg.Save()
 			return l.updatePreview(a)
@@ -574,7 +577,7 @@ func (l *LocalChanges) contextMenu(a *App, x, y int) {
 			l.rebuild(a)
 			return nil
 		}},
-		MenuItem{Label: "Refresh", Hint: "^R", Do: func(a *App) tea.Cmd { return a.Refresh() }},
+		MenuItem{Label: "Refresh", Hint: "ctrl+r", Do: func(a *App) tea.Cmd { return a.Refresh() }},
 	)
 	m := NewMenuAt("", items, x, y)
 	m.Searchable = false
@@ -617,12 +620,14 @@ func (l *LocalChanges) rollback(a *App) {
 
 func OpenRollback(a *App, files []git.FileStatus) {
 	deleteAdded := false
-	var lines []string
-	var fgs []Color
+	var lines, icons []string
+	var fgs, iconFgs []Color
 	hasAdded := false
 	for _, f := range files {
 		lines = append(lines, f.Path)
 		fgs = append(fgs, a.Th.KindColor(f.Kind))
+		ic, ifg := a.fileIcon(f.Path)
+		icons, iconFgs = append(icons, ic), append(iconFgs, ifg)
 		if f.Kind == git.Added {
 			hasAdded = true
 		}
@@ -630,7 +635,7 @@ func OpenRollback(a *App, files []git.FileStatus) {
 	d := &Dialog{Title: "Rollback Changes", Width: 72}
 	d.Fields = []Field{
 		&LabelField{Text: fmt.Sprintf("%s will be reverted to the last committed state:", plural(len(files), "file"))},
-		&ListField{Lines: lines, Fgs: fgs, H: 10},
+		&ListField{Lines: lines, Fgs: fgs, Icons: icons, IconFgs: iconFgs, H: 10},
 	}
 	if hasAdded {
 		d.Fields = append(d.Fields, &CheckField{Label: "Delete local copies of added files", Val: &deleteAdded})
@@ -646,6 +651,49 @@ func OpenRollback(a *App, files []git.FileStatus) {
 		}},
 	}
 	a.Push(d)
+}
+
+// toggleStage is lazygit's space: stage the selection, or unstage it if fully staged.
+func (l *LocalChanges) toggleStage(a *App) tea.Cmd {
+	files := l.selectedFiles()
+	if len(files) == 0 {
+		return nil
+	}
+	allStaged := true
+	var paths []string
+	for _, f := range files {
+		if f.Kind == git.Conflict {
+			continue
+		}
+		paths = append(paths, f.Path)
+		if f.OrigPath != "" {
+			paths = append(paths, f.OrigPath)
+		}
+		if f.Staged() != 2 {
+			allStaged = false
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	if allStaged {
+		unborn := a.Status != nil && a.Status.Unborn
+		return a.Op("Unstage", func() error { return a.Repo.Unstage(paths, unborn) }, nil)
+	}
+	return a.Op("Stage", func() error { return a.Repo.Stage(paths) }, nil)
+}
+
+func (l *LocalChanges) stage(a *App) tea.Cmd {
+	var paths []string
+	for _, f := range l.selectedFiles() {
+		if f.Kind != git.Conflict {
+			paths = append(paths, f.Path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return a.Op("Stage", func() error { return a.Repo.Stage(paths) }, nil)
 }
 
 func (l *LocalChanges) addToVCS(a *App) tea.Cmd {
@@ -846,6 +894,7 @@ func OpenShelveDialog(a *App, files []git.FileStatus, cl *changelist.List) {
 		}
 		repo := a.Repo
 		unborn := a.Status != nil && a.Status.Unborn
+		var skippedFiles []string
 		return a.Op("Shelve", func() error {
 			var srcs []shelf.Source
 			for _, f := range files {
@@ -859,14 +908,25 @@ func OpenShelveDialog(a *App, files []git.FileStatus, cl *changelist.List) {
 				}
 				srcs = append(srcs, src)
 			}
-			if _, err := shelf.Create(repo, name, srcs); err != nil {
+			_, skipped, err := shelf.Create(repo, name, srcs)
+			if err != nil {
 				return err
 			}
+			skippedFiles = skipped
 			if keep {
 				return nil
 			}
-			return repo.Rollback(files, true, unborn)
+			var shelved []git.FileStatus
+			for _, f := range files {
+				if !slices.Contains(skipped, f.Path) {
+					shelved = append(shelved, f)
+				}
+			}
+			return repo.Rollback(shelved, true, unborn)
 		}, func(a *App) tea.Cmd {
+			if len(skippedFiles) > 0 {
+				a.Error("Some files were not shelved", "Binary or very large files can't be shelved and were left untouched:\n"+strings.Join(skippedFiles, "\n"))
+			}
 			a.Notify("Changes shelved", name)
 			return nil
 		}), true
@@ -924,12 +984,14 @@ func (l *LocalChanges) Draw(a *App, v View) {
 	}
 	body := v.Sub(0, y, v.W(), v.H()-y)
 	if a.Cfg.HidePreview {
-		l.tree.Draw(a, body)
+		drawFilesToolbar(a, body.Sub(0, 0, body.W(), 1), "", l.tree)
+		l.tree.Draw(a, body.Sub(0, 1, body.W(), body.H()-1))
 		return
 	}
 	split := int(float64(body.W()) * a.Cfg.LocalSplit)
 	split = max(20, min(body.W()-30, split))
-	l.tree.Draw(a, body.Sub(0, 0, split, body.H()))
+	drawFilesToolbar(a, body.Sub(0, 0, split, 1), "", l.tree)
+	l.tree.Draw(a, body.Sub(0, 1, split, body.H()-1))
 	body.VLine(split, 0, body.H(), '│', Style{Fg: th.Border, Bg: th.Bg})
 	abs := body.Abs()
 	a.Hit(Rect{abs.X + split, abs.Y, 1, body.H()}, func(m Mouse) tea.Cmd {
@@ -1025,3 +1087,5 @@ func (a *App) stateBanner(v View) bool {
 	}
 	return true
 }
+
+func (l *LocalChanges) regroup(a *App) { l.rebuild(a) }

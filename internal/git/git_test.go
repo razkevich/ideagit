@@ -165,3 +165,50 @@ func TestWorktreesAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConsoleKeepsUpdatingPastLimit(t *testing.T) {
+	r := newRepo(t)
+	seen := 0
+	for i := 0; i < 2100; i++ {
+		r.mu.Lock()
+		r.console = append(r.console, ConsoleEntry{Cmd: "x"})
+		r.consoleTotal++
+		if len(r.console) > 2000 {
+			r.console = r.console[len(r.console)-2000:]
+		}
+		r.mu.Unlock()
+		got, total := r.ConsoleSince(seen)
+		if len(got) != 1 {
+			t.Fatalf("entry %d: got %d new entries", i, len(got))
+		}
+		seen = total
+	}
+}
+
+func TestStashActionsCheckIdentity(t *testing.T) {
+	r := newRepo(t)
+	write(t, r, "a.txt", "a\n")
+	r.Commit(CommitRequest{Message: "init", Files: []CommitFile{{Path: "a.txt"}}})
+	write(t, r, "a.txt", "one\n")
+	r.StashPush("one", false, false, nil)
+	list, _ := r.Stashes()
+	old := list[0]
+	write(t, r, "a.txt", "two\n")
+	r.StashPush("two", false, false, nil) // another worktree could have done this
+	if err := r.StashDrop(old); err == nil {
+		t.Fatal("dropped stash@{0} although it is no longer the selected stash")
+	}
+	if list, _ := r.Stashes(); len(list) != 2 {
+		t.Fatalf("stashes = %d", len(list))
+	}
+}
+
+func TestCopyIsNotRename(t *testing.T) {
+	c := newChange("C.", "b.txt", "a.txt")
+	if c.Kind != Added || c.OrigPath != "" {
+		t.Fatalf("copy classified as %+v", c)
+	}
+	if c := newChange("RD", "new.txt", "old.txt"); c.Kind != Renamed {
+		t.Fatalf("rename then delete classified as %v", c.Kind)
+	}
+}

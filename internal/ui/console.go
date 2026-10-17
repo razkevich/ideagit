@@ -32,11 +32,9 @@ func (c *ConsoleTab) OnData(a *App)  {}
 
 func (c *ConsoleTab) refresh(a *App) {
 	th := a.Th
-	entries := a.Repo.Console()
-	if len(entries) == c.seen {
-		return
-	}
-	for _, e := range entries[c.seen:] {
+	entries, total := a.Repo.ConsoleSince(c.seen)
+	c.seen = total
+	for _, e := range entries {
 		c.lines = append(c.lines, consoleLine{text: e.Time.Format("15:04:05.000") + ": [" + a.Repo.Name + "] " + e.Cmd, fg: th.Fg, bold: true})
 		for _, l := range strings.Split(e.Output, "\n") {
 			if l == "" {
@@ -49,12 +47,11 @@ func (c *ConsoleTab) refresh(a *App) {
 			c.lines = append(c.lines, consoleLine{text: l, fg: fg})
 		}
 	}
-	c.seen = len(entries)
 }
 
 func (c *ConsoleTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 	h := max(1, c.height)
-	switch k.String() {
+	switch keyName(k) {
 	case "up", "k":
 		c.top = max(0, c.top-1)
 		c.follow = false
@@ -100,6 +97,7 @@ func (c *ConsoleTab) Draw(a *App, v View) {
 		v.TextFit(1, i, l.text, v.W()-3, Style{Fg: l.fg, Bg: th.Bg, Bold: l.bold})
 	}
 	DrawScrollbar(a, v.Sub(v.W()-1, 0, 1, h), c.top, h, len(c.lines), func(t int) { c.top = t; c.follow = false })
+	a.Selectable(v.Sub(0, 0, v.W()-1, h).Abs(), true)
 	a.Hit(v.Sub(0, 0, v.W()-1, h).Abs(), func(m Mouse) tea.Cmd {
 		if d := m.Wheel(); d != 0 {
 			c.top = max(0, c.top+d*3)

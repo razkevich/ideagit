@@ -302,10 +302,12 @@ type Source struct {
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-func Create(repo *git.Repo, description string, sources []Source) (*Shelf, error) {
+// Create writes a shelf; binary and very large files can't be shelved and are returned
+// in skipped so the caller doesn't roll them back.
+func Create(repo *git.Repo, description string, sources []Source) (s *Shelf, skipped []string, err error) {
 	dir := Dir(repo)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return nil, skipped, err
 	}
 	base := strings.Trim(unsafeName.ReplaceAllString(description, "_"), "_")
 	if base == "" {
@@ -321,9 +323,11 @@ func Create(repo *git.Repo, description string, sources []Source) (*Shelf, error
 	now := time.Now()
 	head := repo.HeadHash()
 	var b strings.Builder
-	for _, s := range sources {
+	for _, src := range sources {
+		s := src
 		r := diff.Compute(s.Old, s.New, diff.IgnoreNone)
 		if r.Binary || r.TooLarge {
+			skipped = append(skipped, s.Path)
 			continue
 		}
 		fmt.Fprintf(&b, "Index: %s\n", s.Path)
@@ -355,18 +359,18 @@ func Create(repo *git.Repo, description string, sources []Source) (*Shelf, error
 	}
 	patchDir := filepath.Join(dir, name)
 	if err := os.MkdirAll(patchDir, 0o755); err != nil {
-		return nil, err
+		return nil, skipped, err
 	}
 	patchPath := filepath.Join(patchDir, "shelved.patch")
 	if err := os.WriteFile(patchPath, []byte(b.String()), 0o644); err != nil {
-		return nil, err
+		return nil, skipped, err
 	}
-	s := &Shelf{Name: name, Description: description, Date: now, XMLPath: filepath.Join(dir, name+".xml"), PatchPath: patchPath}
-	if err := s.writeXML(repo); err != nil {
-		return nil, err
+	sh := &Shelf{Name: name, Description: description, Date: now, XMLPath: filepath.Join(dir, name+".xml"), PatchPath: patchPath}
+	if err := sh.writeXML(repo); err != nil {
+		return nil, skipped, err
 	}
-	s.Files = ParsePatch(b.String())
-	return s, nil
+	sh.Files = ParsePatch(b.String())
+	return sh, skipped, nil
 }
 
 func (s *Shelf) writeXML(repo *git.Repo) error {
@@ -420,6 +424,11 @@ func (s *Shelf) Unshelve(repo *git.Repo, files []*File) (UnshelveResult, error) 
 	for _, f := range files {
 		abs := repo.Abs(f.Path)
 		if f.Kind == git.Deleted {
+			if cur, ok := repo.ReadWorktree(f.Path); ok && string(cur) != string(f.BaseText(repo)) {
+				// Edited since it was shelved; deleting would lose those edits.
+				res.Conflicts = append(res.Conflicts, f.Path)
+				continue
+			}
 			os.Remove(abs)
 			res.Applied = append(res.Applied, f.Path)
 			continue
@@ -456,7 +465,9 @@ func (s *Shelf) Unshelve(repo *git.Repo, files []*File) (UnshelveResult, error) 
 			return res, err
 		}
 		if f.OrigPath != "" && f.OrigPath != f.Path {
-			os.Remove(repo.Abs(f.OrigPath))
+			if cur, ok := repo.ReadWorktree(f.OrigPath); !ok || string(cur) == string(base) {
+				os.Remove(repo.Abs(f.OrigPath))
+			}
 		}
 		res.Applied = append(res.Applied, f.Path)
 	}

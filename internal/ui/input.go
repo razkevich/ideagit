@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/mattn/go-runewidth"
 
 	. "github.com/razkevich/ideagit/internal/canvas"
 )
@@ -34,7 +33,13 @@ func (t *TextInput) SelectAllOnType() {}
 
 // Key handles editing keys and reports whether the key was consumed.
 func (t *TextInput) Key(k tea.KeyMsg) bool {
-	switch k.String() {
+	if keyName(k) == "ctrl+backspace" {
+		k = tea.KeyMsg{Type: tea.KeyCtrlW}
+	}
+	if isChord(k) {
+		return false
+	}
+	switch keyName(k) {
 	case "left", "ctrl+b":
 		t.cur = max(0, t.cur-1)
 	case "right", "ctrl+f":
@@ -108,18 +113,21 @@ func (t *TextInput) Draw(a *App, v View, st Style) {
 	th := a.Th
 	w := v.W()
 	v.Fill(st)
+	a.Selectable(v.Abs(), true)
 	if len(t.val) == 0 && t.Placeholder != "" {
 		v.TextFit(0, 0, t.Placeholder, w, st.WithFg(th.Faint))
 	}
-	if t.cur < t.off {
-		t.off = t.cur
+	t.cur = max(0, min(t.cur, len(t.val)))
+	t.off = max(0, min(t.off, t.cur))
+	if w <= 0 {
+		return
 	}
-	for runewidth.StringWidth(string(t.val[t.off:t.cur])) >= w {
+	for t.off < t.cur && Width(string(t.val[t.off:t.cur])) >= w {
 		t.off++
 	}
 	v.Text(0, 0, string(t.val[t.off:]), st)
 	if t.Focused {
-		cx := runewidth.StringWidth(string(t.val[t.off:t.cur]))
+		cx := Width(string(t.val[t.off:t.cur]))
 		ch := ' '
 		if t.cur < len(t.val) {
 			ch = t.val[t.cur]
@@ -134,8 +142,8 @@ func (t *TextInput) Draw(a *App, v View, st Style) {
 			x := m.X - abs.X
 			pos := t.off
 			acc := 0
-			for pos < len(t.val) && acc+runewidth.RuneWidth(t.val[pos]) <= x {
-				acc += runewidth.RuneWidth(t.val[pos])
+			for pos < len(t.val) && acc+RuneWidth(t.val[pos]) <= x {
+				acc += RuneWidth(t.val[pos])
 				pos++
 			}
 			t.cur = pos
@@ -227,8 +235,14 @@ func (t *TextArea) insert(rs []rune) {
 }
 
 func (t *TextArea) Key(k tea.KeyMsg) bool {
+	if keyName(k) == "ctrl+backspace" {
+		k = tea.KeyMsg{Type: tea.KeyCtrlW}
+	}
+	if isChord(k) {
+		return false
+	}
 	line := t.lines[t.row]
-	switch k.String() {
+	switch keyName(k) {
 	case "left":
 		if t.col > 0 {
 			t.col--
@@ -306,6 +320,7 @@ func (t *TextArea) Draw(a *App, v View) {
 	th := a.Th
 	st := Style{Fg: th.Fg, Bg: th.InputBg}
 	v.Fill(st)
+	a.Selectable(v.Abs(), true)
 	h, w := v.H(), v.W()
 	if t.row < t.top {
 		t.top = t.row
@@ -313,7 +328,7 @@ func (t *TextArea) Draw(a *App, v View) {
 	if t.row >= t.top+h {
 		t.top = t.row - h + 1
 	}
-	curX := runewidth.StringWidth(string(t.lines[t.row][:t.col]))
+	curX := Width(string(t.lines[t.row][:t.col]))
 	if curX < t.left {
 		t.left = curX
 	}
@@ -327,7 +342,7 @@ func (t *TextArea) Draw(a *App, v View) {
 		line := string(t.lines[t.top+i])
 		x := -t.left
 		for _, r := range line {
-			rw := runewidth.RuneWidth(r)
+			rw := RuneWidth(r)
 			if x >= 0 && x+rw <= w {
 				v.Set(x, i, r, st)
 			}
@@ -359,8 +374,8 @@ func (t *TextArea) Draw(a *App, v View) {
 			t.row = row
 			x := m.X - abs.X + t.left
 			col, acc := 0, 0
-			for col < len(t.lines[row]) && acc+runewidth.RuneWidth(t.lines[row][col]) <= x {
-				acc += runewidth.RuneWidth(t.lines[row][col])
+			for col < len(t.lines[row]) && acc+RuneWidth(t.lines[row][col]) <= x {
+				acc += RuneWidth(t.lines[row][col])
 				col++
 			}
 			t.col = col
@@ -403,9 +418,9 @@ func DrawButton(a *App, v View, x, y int, label string, primary, focused bool, o
 // DrawCheckbox draws "[x] label" and toggles on click.
 func DrawCheckbox(a *App, v View, x, y int, label string, val *bool, focused bool, disabled bool) int {
 	th := a.Th
-	box := "[ ]"
+	box := a.checkGlyph(Unchecked)
 	if *val {
-		box = "[x]"
+		box = a.checkGlyph(Checked)
 	}
 	fg := th.Fg
 	if disabled {
@@ -421,7 +436,7 @@ func DrawCheckbox(a *App, v View, x, y int, label string, val *bool, focused boo
 	bg := v.Canvas().At(min(v.Canvas().W-1, v.Abs().X+x), min(v.Canvas().H-1, v.Abs().Y+y)).S.Bg
 	st := Style{Fg: fg, Bg: bg, Underline: focused}
 	v.Text(x, y, box, Style{Fg: bfg, Bg: bg})
-	end := v.Text(x+4, y, label, st)
+	end := v.Text(x+Width(box)+1, y, label, st)
 	abs := v.Abs()
 	if !disabled {
 		a.Hit(Rect{abs.X + x, abs.Y + y, end - x, 1}, func(m Mouse) tea.Cmd {

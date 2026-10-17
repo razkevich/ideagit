@@ -26,6 +26,7 @@ type Node struct {
 	Right     string
 	RightFg   Color
 	Icon      string
+	IconOpen  string
 	IconFg    Color
 	Children  []*Node
 	Lazy      func() []*Node
@@ -63,6 +64,7 @@ func (n *Node) Parent() *Node { return n.parent }
 type trow struct {
 	n     *Node
 	depth int
+	index int
 }
 
 type Tree struct {
@@ -84,12 +86,17 @@ type Tree struct {
 	OnContext  func(a *App, n *Node, x, y int) tea.Cmd
 	height     int
 	lastSel    string
-	// shownSel is the selection last scrolled into view; wheel scrolling may move
-	// the viewport away from an unchanged selection.
-	shownSel   int
+	// shownID is the node last scrolled into view; wheel scrolling may move the viewport
+	// away from an unchanged selection. An ID (not a row index) so a different node that
+	// lands on the same row after a rebuild still gets scrolled to.
+	shownID string
+	// wantID is a selection to restore once that node exists (saved session state).
+	wantID   string
+	hoverRow int
+	hoverSeq int
 }
 
-func NewTree() *Tree { return &Tree{exp: map[string]bool{}, multi: map[string]bool{}, shownSel: -1} }
+func NewTree() *Tree { return &Tree{exp: map[string]bool{}, multi: map[string]bool{}} }
 
 func (t *Tree) SetRoots(roots []*Node) {
 	selID := ""
@@ -109,6 +116,10 @@ func (t *Tree) SetRoots(roots []*Node) {
 	}
 	link(nil, roots)
 	t.rebuild()
+	if t.wantID != "" && t.SelectID(t.wantID) {
+		t.wantID = ""
+		selID = ""
+	}
 	if selID != "" {
 		if !t.SelectID(selID) && t.Sel >= len(t.rows) {
 			t.Sel = max(0, len(t.rows)-1)
@@ -137,7 +148,7 @@ func (t *Tree) rebuild() {
 	var walk func(ns []*Node, depth int)
 	walk = func(ns []*Node, depth int) {
 		for _, n := range ns {
-			t.rows = append(t.rows, trow{n, depth})
+			t.rows = append(t.rows, trow{n, depth, len(t.rows)})
 			if n.Expandable() && t.isExpanded(n) {
 				if n.Lazy != nil && n.Children == nil {
 					n.Children = n.Lazy()
@@ -301,7 +312,7 @@ func (t *Tree) NotifySelection(a *App) tea.Cmd {
 
 func (t *Tree) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 	if t.searching {
-		switch k.String() {
+		switch keyName(k) {
 		case "esc":
 			t.searching = false
 			t.search = ""
@@ -319,9 +330,9 @@ func (t *Tree) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 			}
 			return nil, true
 		case "up", "down":
-			return t.searchStep(a, k.String() == "down"), true
+			return t.searchStep(a, keyName(k) == "down"), true
 		}
-		if k.Type == tea.KeyRunes || k.Type == tea.KeySpace {
+		if (k.Type == tea.KeyRunes || k.Type == tea.KeySpace) && !isChord(k) {
 			t.search += string(k.Runes)
 			if k.Type == tea.KeySpace {
 				t.search += " "
@@ -331,7 +342,7 @@ func (t *Tree) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		t.searching = false
 		t.search = ""
 	}
-	switch k.String() {
+	switch keyName(k) {
 	case "up", "k":
 		return t.move(a, -1, false), true
 	case "down", "j":
@@ -340,13 +351,13 @@ func (t *Tree) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		return t.move(a, -1, true), true
 	case "shift+down", "J":
 		return t.move(a, 1, true), true
-	case "pgup", "ctrl+u":
+	case "pgup":
 		return t.move(a, -max(1, t.height-1), false), true
-	case "pgdown", "ctrl+d":
+	case "pgdown":
 		return t.move(a, max(1, t.height-1), false), true
-	case "home", "g":
+	case "home":
 		return t.move(a, -len(t.rows), false), true
-	case "end", "G":
+	case "end":
 		return t.move(a, len(t.rows), false), true
 	case "left", "h":
 		if n := t.Selected(); n != nil {
@@ -388,10 +399,10 @@ func (t *Tree) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		t.searching = true
 		t.search = ""
 		return nil, true
-	case "*":
+	case "*", "ctrl+kp+", "ctrl+=":
 		t.ExpandAll()
 		return nil, true
-	case "-":
+	case "-", "ctrl+kp-", "ctrl+-":
 		t.CollapseAll()
 		return nil, true
 	}
@@ -402,7 +413,8 @@ func (t *Tree) matches(n *Node) bool {
 	if t.search == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(n.Label), strings.ToLower(t.search))
+	_, hits := fuzzyScore(t.search, n.Label)
+	return len(hits) > 0 && hits[len(hits)-1]-hits[0] == len(hits)-1
 }
 
 func (t *Tree) searchFrom(a *App, from int) tea.Cmd {
@@ -434,8 +446,12 @@ func (t *Tree) searchStep(a *App, down bool) tea.Cmd {
 }
 
 func (t *Tree) ensureVisible(h int) {
-	if t.Sel != t.shownSel {
-		t.shownSel = t.Sel
+	id := ""
+	if n := t.Selected(); n != nil {
+		id = n.ID
+	}
+	if id != t.shownID {
+		t.shownID = id
 		if t.Sel < t.Top {
 			t.Top = t.Sel
 		}
@@ -455,6 +471,7 @@ func (t *Tree) Draw(a *App, v View) {
 	th := a.Th
 	h := v.H()
 	t.height = h
+	a.Selectable(v.Abs(), false)
 	t.ensureVisible(h)
 	base := Style{Fg: th.Fg, Bg: th.PanelBg}
 	if len(t.rows) == 0 {
@@ -488,6 +505,10 @@ func (t *Tree) Draw(a *App, v View) {
 	}
 	abs := v.Abs()
 	a.Hit(Rect{abs.X, abs.Y, w, h}, func(m Mouse) tea.Cmd {
+		if m.Action == tea.MouseActionMotion {
+			t.hoverRow, t.hoverSeq = t.Top+(m.Y-abs.Y), a.motionSeq
+			return nil
+		}
 		if d := m.Wheel(); d != 0 {
 			t.Top = max(0, min(len(t.rows)-h, t.Top+d*3))
 			return nil
@@ -574,6 +595,8 @@ func (t *Tree) drawRow(a *App, v View, r trow, selected bool) {
 		} else {
 			bg = th.SelInactive
 		}
+	} else if r.index == t.hoverRow && a.hovered(t.hoverSeq) {
+		bg = th.Hover
 	}
 	st := Style{Fg: th.Fg, Bg: bg}
 	v.Fill(st)
@@ -587,26 +610,27 @@ func (t *Tree) drawRow(a *App, v View, r trow, selected bool) {
 	}
 	x += 2
 	if n.Check != NoCheck {
-		box := "[ ]"
+		box := a.checkGlyph(n.Check)
 		fg := th.Dim
-		switch n.Check {
-		case Checked:
-			box, fg = "[x]", th.Accent
-		case Partial:
-			box, fg = "[-]", th.Accent
+		if n.Check != Unchecked {
+			fg = th.Accent
 		}
-		if selected {
+		if selected && !a.icons {
 			fg = th.Fg
 		}
 		v.Text(x, 0, box, st.WithFg(fg))
-		x += 4
+		x += Width(box) + 1
 	}
 	if n.Icon != "" {
 		fg := n.IconFg
 		if fg == NoColor {
 			fg = th.Dim
 		}
-		x = v.Text(x, 0, n.Icon, st.WithFg(fg)) + 1
+		glyph := n.Icon
+		if n.IconOpen != "" && n.Expandable() && t.isExpanded(n) {
+			glyph = n.IconOpen
+		}
+		x = v.Text(x, 0, glyph, st.WithFg(fg)) + 1
 	}
 	rightW := 0
 	if n.Right != "" {
@@ -624,14 +648,15 @@ func (t *Tree) drawRow(a *App, v View, r trow, selected bool) {
 	lx := x
 	x = v.Text(x, 0, label, ls)
 	if t.searching && t.search != "" {
-		if i := strings.Index(strings.ToLower(label), strings.ToLower(t.search)); i >= 0 {
-			pre := Width(label[:i])
-			mw := Width(label[i : i+len(t.search)])
-			for xx := lx + pre; xx < lx+pre+mw; xx++ {
-				v.Tint(xx, 0, 1, th.Warning)
-			}
-			sub := v.Sub(lx+pre, 0, mw, 1)
-			sub.Text(0, 0, label[i:i+len(t.search)], Style{Fg: Hex("#000000"), Bg: th.Warning})
+		lr := []rune(label)
+		low := make([]rune, len(lr))
+		for i, r := range lr {
+			low[i] = unicode.ToLower(r)
+		}
+		q := []rune(strings.ToLower(t.search))
+		if i := runeIndex(low, q); i >= 0 {
+			col := lx + Width(string(lr[:i]))
+			v.Text(col, 0, string(lr[i:i+len(q)]), Style{Fg: Hex("#000000"), Bg: th.Warning})
 		}
 	}
 	if n.Extra != "" && x+2 < v.W()-rightW {

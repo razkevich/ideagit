@@ -2,8 +2,9 @@ package ui
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,6 +24,8 @@ const (
 )
 
 type LogTab struct {
+	// me is user.name, shown bold in the author column like IntelliJ; nil until read.
+	me       *string
 	filter   git.LogFilter
 	closable bool
 	text     *TextInput
@@ -46,11 +49,15 @@ type LogTab struct {
 	details  *git.CommitDetails
 	detFiles []git.ChangedFile
 	contains []string
-	detGen   int
-	detHash  string
-	detTop   int
-	pending  string
-	shownSel int
+	detGen   int64
+	// detLatest mirrors detGen for the background "In N branches" lookup.
+	detLatest atomic.Int64
+	detHash   string
+	detTop    int
+	pending   string
+	shownSel  int
+	hoverRow  int
+	hoverSeq  int
 }
 
 func NewLogTab(f git.LogFilter, closable bool) *LogTab {
@@ -122,7 +129,7 @@ func (t *LogTab) Hint() string {
 	case lfBranches:
 		return "⏎ filter by branch · . branch actions · tab next pane"
 	case lfFiles:
-		return "⏎ diff · H file history · tab next pane"
+		return filesHint
 	}
 	return "⏎ diff · . actions · / filter · tab panes · c cherry-pick · ctrl+b branches · y copy hash"
 }
@@ -254,6 +261,7 @@ func (t *LogTab) loadDetails(a *App) tea.Cmd {
 	}
 	t.detGen++
 	gen := t.detGen
+	t.detLatest.Store(gen)
 	commit := c
 	repo := a.Repo
 	t.detHash = c.Hash
@@ -275,7 +283,7 @@ func (t *LogTab) loadDetails(a *App) tea.Cmd {
 		}
 	}), Async(func() func(a *App) tea.Cmd {
 		time.Sleep(150 * time.Millisecond)
-		if gen != t.detGen {
+		if gen != t.detLatest.Load() {
 			return func(a *App) tea.Cmd { return nil }
 		}
 		br := repo.BranchesContaining(commit.Hash)
@@ -289,7 +297,6 @@ func (t *LogTab) loadDetails(a *App) tea.Cmd {
 }
 
 func (t *LogTab) buildBranches(a *App) {
-	th := a.Th
 	head := &Node{ID: "b:HEAD", Label: "HEAD (Current Branch)", Check: NoCheck, Data: "HEAD"}
 	local := &Node{ID: "b:local", Label: "Local", Check: NoCheck}
 	remote := &Node{ID: "b:remote", Label: "Remote", Check: NoCheck}
@@ -320,13 +327,10 @@ func (t *LogTab) buildBranches(a *App) {
 		return func(r git.Ref) *Node {
 			name := strings.TrimPrefix(r.Name, strip)
 			n := &Node{ID: "b:" + prefix + ":" + r.Name, Label: baseOf(name), Check: NoCheck, Data: r}
+			n.Icon, n.IconFg = a.branchIcon(r)
 			if r.IsHead {
-				n.Icon, n.IconFg = "◆", th.RefHead
 				n.Bold = true
-			} else if r.Kind == git.Tag {
-				n.Icon, n.IconFg = "◇", th.RefTag
-			} else if isFavorite(name) {
-				n.Icon, n.IconFg = "★", th.RefHead
+				n.Extra = "current"
 			}
 			if r.Ahead > 0 || r.Behind > 0 {
 				n.Right = aheadBehind(r.Ahead, r.Behind)
@@ -334,17 +338,31 @@ func (t *LogTab) buildBranches(a *App) {
 			return n
 		}
 	}
-	sort.SliceStable(localRefs, func(i, j int) bool {
-		fi, fj := isFavorite(localRefs[i].Name), isFavorite(localRefs[j].Name)
-		if fi != fj {
-			return fi
+	// Favorites sit on top of their group, ahead of the folders, like IntelliJ.
+	splitFav := func(refs []git.Ref) (fav, rest []git.Ref) {
+		for _, r := range refs {
+			if a.isFavorite(r.Name) {
+				fav = append(fav, r)
+			} else {
+				rest = append(rest, r)
+			}
 		}
-		return localRefs[i].Name < localRefs[j].Name
-	})
-	local.Children = groupByDir(a, "local", localRefs, leaf("l", ""), func(r git.Ref) string { return r.Name })
+		return
+	}
+	favLocal, restLocal := splitFav(localRefs)
+	for _, r := range favLocal {
+		local.Children = append(local.Children, leaf("l", "")(r))
+	}
+	local.Children = append(local.Children, groupByDir(a, "local", restLocal, leaf("l", ""), func(r git.Ref) string { return r.Name })...)
 	for _, rm := range remoteOrder {
 		node := remotes[rm]
-		node.Children = groupByDir(a, "r:"+rm, remoteRefs[rm], leaf("r", rm+"/"), func(r git.Ref) string { return strings.TrimPrefix(r.Name, rm+"/") })
+		fav, rest := splitFav(remoteRefs[rm])
+		for _, r := range fav {
+			n := leaf("r", rm+"/")(r)
+			n.Label = strings.TrimPrefix(r.Name, rm+"/")
+			node.Children = append(node.Children, n)
+		}
+		node.Children = append(node.Children, groupByDir(a, "r:"+rm, rest, leaf("r", rm+"/"), func(r git.Ref) string { return strings.TrimPrefix(r.Name, rm+"/") })...)
 		remote.Children = append(remote.Children, node)
 	}
 	tags.Children = groupByDir(a, "tags", tagRefs, leaf("t", ""), func(r git.Ref) string { return r.Name })
@@ -365,13 +383,60 @@ func stripDirExtra(ns []*Node) {
 	for _, n := range ns {
 		if strings.HasPrefix(n.ID, "d:") {
 			n.Extra = ""
-			n.Icon = ""
 		}
 		stripDirExtra(n.Children)
 	}
 }
 
-func isFavorite(name string) bool { return name == "main" || name == "master" }
+// Favorite branches, IntelliJ-style: starred per repository, main/master by default.
+var defaultFavorites = []string{"main", "master", "origin/main", "origin/master"}
+
+func (a *App) favorites() []string {
+	if f, ok := a.Cfg.Favorites[a.Repo.MainRootCached()]; ok {
+		return f
+	}
+	return defaultFavorites
+}
+
+func (a *App) isFavorite(name string) bool {
+	return slices.Contains(a.favorites(), name)
+}
+
+func (a *App) toggleFavorite(name string) {
+	favs := append([]string(nil), a.favorites()...)
+	if i := slices.Index(favs, name); i >= 0 {
+		favs = slices.Delete(favs, i, i+1)
+	} else {
+		favs = append(favs, name)
+	}
+	if a.Cfg.Favorites == nil {
+		a.Cfg.Favorites = map[string][]string{}
+	}
+	a.Cfg.Favorites[a.Repo.MainRootCached()] = favs
+	a.Cfg.Save()
+	for _, t := range a.tabs {
+		if l, ok := t.(*LogTab); ok {
+			l.buildBranches(a)
+		}
+	}
+}
+
+// branchIcon is IntelliJ's: a gold tag for favorites, a branch glyph otherwise.
+func (a *App) branchIcon(r git.Ref) (string, Color) {
+	th := a.Th
+	switch {
+	case r.Kind == git.Tag:
+		return "◇", th.RefTag
+	case a.isFavorite(r.Name):
+		if a.icons {
+			return "\uf02b", th.Warning
+		}
+		return "★", th.Warning
+	case a.icons:
+		return "\ue725", th.Dim
+	}
+	return "", NoColor
+}
 
 func aheadBehind(ahead, behind int) string {
 	var s []string
@@ -420,7 +485,7 @@ func (t *LogTab) setFocus(f logFocus) {
 }
 
 func (t *LogTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
-	s := k.String()
+	s := keyName(k)
 	if t.focus == lfFilter {
 		switch s {
 		case "esc", "enter", "down", "tab":
@@ -493,21 +558,11 @@ func (t *LogTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		if cmd, ok := t.files.Key(a, k); ok {
 			return cmd, true
 		}
-		switch s {
-		case "esc":
+		if s == "esc" {
 			t.setFocus(lfTable)
 			return nil, true
-		case "H":
-			if p := t.SelectedPath(); p != "" {
-				return a.OpenLog(git.LogFilter{Paths: []string{p}}), true
-			}
-		case ".", "shift+f10":
-			t.fileMenu(a, -1, -1)
-			return nil, true
-		case "ctrl+d":
-			return t.openFileDiff(a), true
 		}
-		return nil, false
+		return fileKey(a, s, t.SelectedPath(), t.openFileDiff, func() { t.fileMenu(a, -1, -1) })
 	}
 	h := max(1, t.height)
 	switch s {
@@ -519,24 +574,26 @@ func (t *LogTab) Key(a *App, k tea.KeyMsg) (tea.Cmd, bool) {
 		return t.moveSel(a, -1, true), true
 	case "shift+down", "J":
 		return t.moveSel(a, 1, true), true
-	case "pgup", "ctrl+u":
+	case "pgup":
 		return t.moveSel(a, -h+1, false), true
-	case "pgdown", "ctrl+d":
+	case "pgdown":
 		return t.moveSel(a, h-1, false), true
-	case "home", "g":
+	case "home":
 		return t.moveSel(a, -len(t.commits), false), true
-	case "end", "G":
+	case "end":
 		return t.moveSel(a, len(t.commits), false), true
 	case "enter", "o":
 		return t.openCommitDiff(a), true
 	case ".", "shift+f10", "alt+enter":
 		t.commitMenu(a, -1, -1)
 		return nil, true
-	case "y":
+	case "y", "ctrl+alt+shift+c":
 		if c := t.selected(); c != nil {
 			return copyToClipboard(a, c.Hash), true
 		}
-	case "c":
+	case "ctrl+d":
+		return t.openCommitDiff(a), true
+	case "c", "C":
 		return t.cherryPick(a), true
 	case "left", "h":
 		if c := t.selected(); c != nil && len(c.Parents) > 0 {
@@ -599,12 +656,11 @@ func (t *LogTab) diffFiles(a *App, hash string, files []git.ChangedFile, idx int
 	for _, f := range files {
 		srcs = append(srcs, commitSource(a.Repo, hash, parent, f))
 	}
-	if len(srcs) == 0 {
-		return nil
+	title := short(hash)
+	if c := t.selected(); c != nil && c.Hash == hash {
+		title += "  " + c.Subject
 	}
-	w := NewDiffWindow(srcs[idx].Path)
-	a.Push(w)
-	return w.diff.SetSources(a, srcs, idx, true)
+	return a.OpenChanges(title, nil, srcs, idx, nil)
 }
 
 // parentOf uses the parents already loaded with the commit details instead of asking git.
@@ -646,15 +702,13 @@ func (t *LogTab) fileMenu(a *App, x, y int) {
 		return
 	}
 	hash := t.detHash
-	items := []MenuItem{
-		{Label: "Show Diff", Hint: "⏎", Do: func(a *App) tea.Cmd { return t.openFileDiff(a) }},
-		{Label: "Compare with Local", Do: func(a *App) tea.Cmd {
+	items := append(fileItems(a, f.Path, t.openFileDiff), MenuSep(),
+		MenuItem{Label: "Compare with Local", Do: func(a *App) tea.Cmd {
 			w := NewDiffWindow(f.Path)
 			a.Push(w)
 			return w.diff.SetSources(a, []DiffSource{compareSource(a.Repo, hash, short(hash), f)}, 0, true)
 		}},
-		{Label: "Show History for File", Hint: "H", Do: func(a *App) tea.Cmd { return a.OpenLog(git.LogFilter{Paths: []string{f.Path}}) }},
-		{Label: "Revert Selected Changes", Do: func(a *App) tea.Cmd {
+		MenuItem{Label: "Revert Selected Changes", Do: func(a *App) tea.Cmd {
 			return a.Op("Revert file changes", func() error {
 				parent := a.Repo.ParentRev(hash)
 				if b, ok := a.Repo.Show(parent, firstNonEmpty(f.OrigPath, f.Path)); ok {
@@ -663,19 +717,15 @@ func (t *LogTab) fileMenu(a *App, x, y int) {
 				return removeFile(a.Repo.Abs(f.Path))
 			}, nil)
 		}},
-		{Label: "Get from Revision", Do: func(a *App) tea.Cmd {
+		MenuItem{Label: "Get from Revision", Do: func(a *App) tea.Cmd {
 			return a.Op("Get from revision", func() error {
 				if b, ok := a.Repo.Show(hash, f.Path); ok {
 					return writeFile(a.Repo.Abs(f.Path), b)
 				}
 				return removeFile(a.Repo.Abs(f.Path))
 			}, nil)
-		}},
-		{Label: "Copy Path", Do: func(a *App) tea.Cmd { return copyToClipboard(a, f.Path) }},
-	}
-	m := NewMenuAt("", items, x, y)
-	m.Searchable = false
-	a.Push(m)
+		}})
+	showFileMenu(a, items, x, y)
 }
 
 func (t *LogTab) cherryPick(a *App) tea.Cmd {
@@ -826,7 +876,7 @@ func (t *LogTab) drawFilterBar(a *App, v View) {
 	box.Fill(Style{Bg: th.InputBg})
 	box.Text(1, 0, "⌕", Style{Fg: th.Dim, Bg: th.InputBg})
 	t.text.Focused = t.focus == lfFilter
-	inW := fw - 10
+	inW := max(1, fw-10)
 	t.text.Draw(a, box.Sub(3, 0, inW, 1), Style{Fg: th.Fg, Bg: th.InputBg})
 	a.HitPass(box.Abs(), func(m Mouse) tea.Cmd {
 		if m.LeftPress() {
@@ -900,6 +950,9 @@ func (t *LogTab) drawFilterBar(a *App, v View) {
 	}
 	v.Text(right, 0, icon, st)
 	a.Hit(Rect{v.Abs().X + right, v.Abs().Y, 1, 1}, func(m Mouse) tea.Cmd {
+		if m.Action == tea.MouseActionMotion {
+			a.tip = "Refresh (ctrl+r)"
+		}
 		if m.LeftPress() {
 			return t.Reload(a)
 		}
@@ -1075,6 +1128,7 @@ func (t *LogTab) drawTable(a *App, v View) {
 	th := a.Th
 	h := v.H()
 	t.height = h
+	a.Selectable(v.Abs(), false)
 	v.Fill(Style{Bg: th.Bg})
 	if t.err != nil {
 		v.Text(2, 1, t.err.Error(), Style{Fg: th.Error, Bg: th.Bg})
@@ -1109,6 +1163,10 @@ func (t *LogTab) drawTable(a *App, v View) {
 	if a.Status != nil {
 		head = a.Status.OID
 	}
+	if t.me == nil {
+		me := a.Repo.UserName()
+		t.me = &me
+	}
 	for i := 0; i < h && t.top+i < len(t.commits); i++ {
 		idx := t.top + i
 		c := t.commits[idx]
@@ -1120,6 +1178,8 @@ func (t *LogTab) drawTable(a *App, v View) {
 			if t.focus == lfTable {
 				bg = th.Sel
 			}
+		} else if idx == t.hoverRow && a.hovered(t.hoverSeq) {
+			bg = th.Hover
 		}
 		rv := v.Sub(0, i, w, 1)
 		rv.Fill(Style{Bg: bg})
@@ -1143,7 +1203,11 @@ func (t *LogTab) drawTable(a *App, v View) {
 		if len(parts) > 0 {
 			labelW = min(Width(strings.Join(parts, "  "))+2, subjW/3)
 		}
-		subjSt := Style{Fg: th.Fg, Bg: bg}
+		fg := th.Fg
+		if len(c.Parents) > 1 {
+			fg = th.Dim
+		}
+		subjSt := Style{Fg: fg, Bg: bg}
 		if c.Hash == head {
 			subjSt.Bold = true
 		}
@@ -1160,7 +1224,9 @@ func (t *LogTab) drawTable(a *App, v View) {
 					icon, name, _ := strings.Cut(text, " ")
 					text = icon + " " + TruncateLeft(name, max(1, avail-Width(icon)-1))
 				}
-				lx = rv.Text(lx, 0, text, Style{Fg: l.fg, Bg: bg}) + 2
+				icon, name, _ := strings.Cut(text, " ")
+				lx = rv.Text(lx, 0, icon, Style{Fg: l.fg, Bg: bg}) + 1
+				lx = rv.Text(lx, 0, name, Style{Fg: th.Dim, Bg: bg}) + 2
 				avail = subjW - lx
 			}
 		}
@@ -1168,14 +1234,18 @@ func (t *LogTab) drawTable(a *App, v View) {
 		if c.Committer != "" && c.Committer != c.Author {
 			author += "*"
 		}
-		rv.TextFit(subjW+1, 0, author, authorW, Style{Fg: th.Fg, Bg: bg})
-		rv.TextFit(subjW+authorW+2, 0, fmtDate(c.Date), dateW, Style{Fg: th.Fg, Bg: bg})
+		rv.TextFit(subjW+1, 0, author, authorW, Style{Fg: fg, Bg: bg, Bold: *t.me != "" && c.Author == *t.me})
+		rv.TextFit(subjW+authorW+2, 0, fmtDate(c.Date), dateW, Style{Fg: fg, Bg: bg})
 	}
 	if len(t.commits) > h {
 		DrawScrollbar(a, v.Sub(w, 0, 1, h), t.top, h, len(t.commits), func(top int) { t.top = top })
 	}
 	abs := v.Abs()
 	a.Hit(Rect{abs.X, abs.Y, w, h}, func(m Mouse) tea.Cmd {
+		if m.Action == tea.MouseActionMotion {
+			t.hoverRow, t.hoverSeq = t.top+(m.Y-abs.Y), a.motionSeq
+			return nil
+		}
 		if d := m.Wheel(); d != 0 {
 			t.top = max(0, min(len(t.commits)-h, t.top+d*3))
 			if t.top+h > len(t.commits)-20 && len(t.commits) >= t.limit {
@@ -1236,7 +1306,12 @@ func (t *LogTab) drawDetails(a *App, v View) {
 		return
 	}
 	fv := v.Sub(0, 0, v.W(), filesH)
-	t.files.Draw(a, fv)
+	label := ""
+	if t.details != nil && t.details.Hash == c.Hash {
+		label = plural(len(t.detFiles), "file")
+	}
+	drawFilesToolbar(a, fv.Sub(0, 0, fv.W(), 1), label, t.files)
+	t.files.Draw(a, fv.Sub(0, 1, fv.W(), fv.H()-1))
 	a.HitPass(fv.Abs(), func(m Mouse) tea.Cmd {
 		if m.LeftPress() || m.RightPress() {
 			t.setFocus(lfFiles)
@@ -1250,49 +1325,52 @@ func (t *LogTab) drawDetails(a *App, v View) {
 		dv.Text(0, 0, "Loading…", Style{Fg: th.Dim, Bg: th.Bg})
 		return
 	}
-	var lines []refLabel
-	add := func(s string, fg Color) {
+	a.Selectable(dv.Abs(), true)
+	var lines []mdLine
+	add := func(s string, fg Color, bold bool) {
 		for _, l := range wrapText(s, dv.W()) {
-			lines = append(lines, refLabel{l, fg})
+			lines = append(lines, mdLine{segs: []mdSeg{{l, Style{Fg: fg, Bg: th.Bg, Bold: bold}}}, bg: NoColor})
 		}
 	}
-	for i, l := range strings.Split(d.Message, "\n") {
-		if i == 0 {
-			add(l, th.Fg)
-			continue
-		}
-		add(l, th.Fg)
+	blank := func() { lines = append(lines, mdLine{bg: NoColor}) }
+	subject, body, _ := strings.Cut(d.Message, "\n")
+	add(subject, th.Fg, true)
+	body, trailers := splitTrailers(body)
+	if strings.TrimSpace(body) != "" {
+		blank()
+		lines = append(lines, renderMarkdown(a, strings.TrimSpace(body), dv.W())...)
 	}
-	lines = append(lines, refLabel{"", th.Fg})
-	add(fmt.Sprintf("%s %s <%s> on %s at %s", short(d.Hash), d.Author, d.Email, d.Date.Format("02/01/2006"), d.Date.Format("15:04")), th.Dim)
+	if len(trailers) > 0 {
+		blank()
+		for _, tr := range trailers {
+			add(tr, th.Dim, false)
+		}
+	}
+	blank()
+	add(fmt.Sprintf("%s %s <%s> on %s at %s", short(d.Hash), d.Author, d.Email, d.Date.Format("02/01/2006"), d.Date.Format("15:04")), th.Dim, false)
 	if d.Committer != d.Author || d.CDate.Sub(d.Date) > time.Minute || d.Date.Sub(d.CDate) > time.Minute {
-		add(fmt.Sprintf("committed by %s <%s> on %s at %s", d.Committer, d.CEmail, d.CDate.Format("02/01/2006"), d.CDate.Format("15:04")), th.Dim)
+		add(fmt.Sprintf("committed by %s <%s> on %s at %s", d.Committer, d.CEmail, d.CDate.Format("02/01/2006"), d.CDate.Format("15:04")), th.Dim, false)
 	}
 	if len(d.Parents) > 1 {
 		var ps []string
 		for _, p := range d.Parents {
 			ps = append(ps, short(p))
 		}
-		add("Merge of "+strings.Join(ps, ", "), th.Dim)
+		add("Merge of "+strings.Join(ps, ", "), th.Dim, false)
 	}
 	if t.contains != nil {
-		lines = append(lines, refLabel{"", th.Fg})
+		blank()
 		shown := t.contains
 		more := ""
 		if len(shown) > 12 {
 			more = fmt.Sprintf(" and %d more", len(shown)-12)
 			shown = shown[:12]
 		}
-		add(fmt.Sprintf("In %s: %s%s", plural(len(t.contains), "branch"), strings.Join(shown, ", "), more), th.Link)
+		add(fmt.Sprintf("In %s: %s%s", plural(len(t.contains), "branch"), strings.Join(shown, ", "), more), th.Link, false)
 	}
 	t.detTop = max(0, min(t.detTop, len(lines)-dv.H()))
 	for i := 0; i < dv.H() && t.detTop+i < len(lines); i++ {
-		l := lines[t.detTop+i]
-		st := Style{Fg: l.fg, Bg: th.Bg}
-		if t.detTop+i == 0 {
-			st.Bold = true
-		}
-		dv.Text(0, i, l.text, st)
+		drawMDLine(dv, i, lines[t.detTop+i])
 	}
 	a.Hit(dv.Abs(), func(m Mouse) tea.Cmd {
 		if dd := m.Wheel(); dd != 0 {
@@ -1300,4 +1378,10 @@ func (t *LogTab) drawDetails(a *App, v View) {
 		}
 		return nil
 	})
+}
+
+func (t *LogTab) regroup(a *App) {
+	if t.detFiles != nil {
+		t.files.SetRoots(changedFileNodes(a, "commit", t.detFiles))
+	}
 }

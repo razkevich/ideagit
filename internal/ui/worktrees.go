@@ -74,17 +74,27 @@ func (a *App) loadWorktreeStatus() tea.Cmd {
 	step = func(from int) tea.Cmd {
 		return Async(func() func(a *App) tea.Cmd {
 			to := min(len(wts), from+12)
+			results := make([]git.Worktree, to-from)
 			done := make(chan struct{}, to-from)
-			for _, w := range wts[from:to] {
-				go func(w *git.Worktree) {
-					repo.WorktreeStatus(w, base)
+			for i, w := range wts[from:to] {
+				// Copies: the UI keeps drawing the originals meanwhile.
+				results[i] = *w
+				go func(cp *git.Worktree) {
+					repo.WorktreeStatus(cp, base)
 					done <- struct{}{}
-				}(w)
+				}(&results[i])
 			}
 			for i := from; i < to; i++ {
 				<-done
 			}
 			return func(a *App) tea.Cmd {
+				for _, r := range results {
+					for _, w := range a.Worktrees {
+						if w.Path == r.Path && w.Head == r.Head {
+							w.Dirty, w.Ahead, w.Behind, w.Merged, w.StatusOK = r.Dirty, r.Ahead, r.Behind, r.Merged, r.StatusOK
+						}
+					}
+				}
 				if to < len(wts) {
 					return step(to)
 				}
@@ -123,7 +133,7 @@ func (a *App) claudeSummary() (sessions, worktrees, working int) {
 
 func (a *App) drawTitleBar(v View) {
 	th := a.Th
-	bg := th.HeaderBg
+	bg := th.Frame
 	st := Style{Fg: th.Fg, Bg: bg}
 	v.Fill(st)
 	x := 1
@@ -157,32 +167,9 @@ func (a *App) drawTitleBar(v View) {
 		item(label+" ⌄", th.Fg, false, func() { a.OpenWorktrees() })
 		x++
 	}
-	if act, ok := a.Claude[a.Repo.Root]; ok && act.Open > 0 {
-		x = a.drawClaudeBadge(v, x, 0, act, bg, true) + 2
-	}
-	if sessions, wts, working := a.claudeSummary(); sessions > 0 {
-		s := fmt.Sprintf("claude: %s in %s", plural(sessions, "session"), plural(wts, "worktree"))
-		if working > 0 {
-			s += fmt.Sprintf(" · %d working", working)
-		}
-		item(s, th.Dim, false, func() { a.OpenWorktrees() })
-		x++
-	}
 	right := v.W() - 1
-	branch := a.HeadLabel()
-	if branch != "" {
-		label := "⎇ " + branch + " ⌄"
-		bx := v.TextRight(right, 0, label, Style{Fg: th.Fg, Bg: bg})
-		a.Hit(Rect{v.Abs().X + bx, v.Abs().Y, Width(label), 1}, func(m Mouse) tea.Cmd {
-			if m.LeftPress() {
-				a.OpenBranches()
-			}
-			return nil
-		})
-		right = bx - 2
-	}
 	path := relHome(a.Repo.Root)
-	if right-x > 12 {
+	if right-x > 12 && !a.showProject() {
 		p := TruncateLeft(path, right-x)
 		px := right - Width(p)
 		v.Text(px, 0, p, Style{Fg: th.Faint, Bg: bg})
@@ -364,7 +351,7 @@ func (w *WorktreesWindow) switchTo(a *App, wt *git.Worktree) tea.Cmd {
 
 func (w *WorktreesWindow) Key(a *App, k tea.KeyMsg) tea.Cmd {
 	if w.typing {
-		switch k.String() {
+		switch keyName(k) {
 		case "esc", "enter", "down":
 			w.typing = false
 			return nil
@@ -375,7 +362,7 @@ func (w *WorktreesWindow) Key(a *App, k tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	wt := w.selected()
-	switch k.String() {
+	switch keyName(k) {
 	case "esc", "q", "W":
 		a.Pop(w)
 		return nil
@@ -408,7 +395,7 @@ func (w *WorktreesWindow) Key(a *App, k tea.KeyMsg) tea.Cmd {
 		}
 	case "l":
 		if wt != nil && wt.Origin != git.OriginMain {
-			return a.Op("Lock worktree", func() error { return a.Repo.SetWorktreeLock(wt.Path, !wt.Locked) }, nil)
+			return a.Op(map[bool]string{false: "Lock worktree", true: "Unlock worktree"}[wt.Locked], func() error { return a.Repo.SetWorktreeLock(wt.Path, !wt.Locked) }, nil)
 		}
 	case "o":
 		w.sortBy = 1 - w.sortBy
@@ -416,7 +403,7 @@ func (w *WorktreesWindow) Key(a *App, k tea.KeyMsg) tea.Cmd {
 		return nil
 	case "r", "ctrl+r":
 		return tea.Batch(a.Refresh(), a.loadWorktreeStatus(), a.scanClaude())
-	case ".", "shift+f10":
+	case ".", "shift+f10", "alt+enter":
 		w.menu(a, -1, -1)
 		return nil
 	case "L":
@@ -436,7 +423,7 @@ func (w *WorktreesWindow) menu(a *App, x, y int) {
 		{Label: "Switch to Worktree", Hint: "⏎", Disabled: none || wt.Current, Do: func(a *App) tea.Cmd { return w.switchTo(a, wt) }},
 		{Label: "Open Shell Here", Hint: "s", Disabled: none, Do: func(a *App) tea.Cmd { return a.OpenShell(wt.Path) }},
 		{Label: "Open in IntelliJ", Hint: "i", Disabled: none, Do: func(a *App) tea.Cmd { return a.OpenInIDE(wt.Path) }},
-		{Label: "Show Branch in Log", Hint: "L", Disabled: none, Do: func(a *App) tea.Cmd {
+		{Label: "Show in Log", Hint: "L", Disabled: none, Do: func(a *App) tea.Cmd {
 			a.Pop(w)
 			return a.OpenLog(git.LogFilter{Branches: []string{firstNonEmpty(wt.Branch, wt.Head)}})
 		}},
@@ -445,7 +432,7 @@ func (w *WorktreesWindow) menu(a *App, x, y int) {
 		{Label: "New Worktree…", Hint: "n", Do: func(a *App) tea.Cmd { OpenNewWorktree(a); return nil }},
 		{Label: "Remove Worktree…", Hint: "⌦", Disabled: none || wt.Origin == git.OriginMain, Do: func(a *App) tea.Cmd { OpenRemoveWorktree(a, wt); return nil }},
 		{Label: lockLabel(wt), Hint: "l", Disabled: none || wt.Origin == git.OriginMain, Do: func(a *App) tea.Cmd {
-			return a.Op("Lock worktree", func() error { return a.Repo.SetWorktreeLock(wt.Path, !wt.Locked) }, nil)
+			return a.Op(map[bool]string{false: "Lock worktree", true: "Unlock worktree"}[wt.Locked], func() error { return a.Repo.SetWorktreeLock(wt.Path, !wt.Locked) }, nil)
 		}},
 		MenuSep(),
 		{Label: "Clean Up Merged Worktrees…", Hint: "C", Do: func(a *App) tea.Cmd { return OpenCleanup(a) }},
@@ -471,15 +458,18 @@ func (w *WorktreesWindow) Draw(a *App, screen View) {
 	bg := th.HeaderBg
 	v.Fill(Style{Bg: bg})
 	title := "Worktrees · " + filepath.Base(a.Repo.MainRootCached())
-	v.Box(Style{Fg: th.Border, Bg: bg}, title, Style{Fg: th.Fg, Bg: bg, Bold: true})
-	status := fmt.Sprintf("%d worktrees", len(a.Worktrees))
+	v.Box(Style{Fg: th.PopupBorder, Bg: bg}, title, Style{Fg: th.Fg, Bg: bg, Bold: true})
+	// Per-group counts are in the tree; the header only adds what isn't shown there.
+	var status []string
 	if a.wtStatusLoading {
-		status += " · loading status…"
+		status = append(status, "loading status…")
 	}
 	if sessions, wts, working := a.claudeSummary(); sessions > 0 {
-		status += fmt.Sprintf(" · claude: %s in %s, %d working", plural(sessions, "session"), plural(wts, "worktree"), working)
+		status = append(status, fmt.Sprintf("claude: %s in %s, %d working", plural(sessions, "session"), plural(wts, "worktree"), working))
 	}
-	v.TextRight(W-3, 0, " "+status+" ", Style{Fg: th.Dim, Bg: bg})
+	if s := strings.Join(status, " · "); s != "" && W-Width(title)-10 > Width(s) {
+		v.TextRight(W-3, 0, " "+s+" ", Style{Fg: th.Dim, Bg: bg})
+	}
 	fv := v.Sub(2, 1, W-4, 1)
 	fv.Fill(Style{Bg: th.InputBg})
 	fv.Text(0, 0, "⌕", Style{Fg: th.Dim, Bg: th.InputBg})
@@ -491,9 +481,16 @@ func (w *WorktreesWindow) Draw(a *App, screen View) {
 		}
 		return nil
 	})
+	// The details section gives way first in short windows.
 	detailH := 5
-	tv := v.Sub(1, 3, W-2, H-4-detailH)
+	if H < 14 {
+		detailH = 0
+	}
+	tv := v.Sub(1, 3, W-2, max(1, H-4-detailH))
 	w.tree.Draw(a, tv)
+	if detailH == 0 {
+		return
+	}
 	v.HLine(1, H-1-detailH, W-2, '─', Style{Fg: th.Border, Bg: bg})
 	dv := v.Sub(2, H-detailH, W-4, detailH-1)
 	wt := w.selected()
@@ -588,7 +585,7 @@ func OpenNewWorktree(a *App) {
 	}}}
 	// The location follows the branch name until the user edits it.
 	d.BeforeKey = func(a *App, d *Dialog, k tea.KeyMsg) {
-		if d.focusedField() == locField && (k.Type == tea.KeyRunes || k.String() == "backspace") {
+		if d.focusedField() == locField && (k.Type == tea.KeyRunes || keyName(k) == "backspace") {
 			locTouched = true
 		}
 	}
@@ -750,7 +747,7 @@ func (a *App) OpenProjects() {
 	items = append(items, MenuSep(),
 		MenuItem{Label: "Open Directory…", Icon: "⌂", Do: func(a *App) tea.Cmd { OpenDirectoryPrompt(a); return nil }},
 		MenuItem{Label: "Worktrees…", Icon: "⌥", Hint: "W", Do: func(a *App) tea.Cmd { a.OpenWorktrees(); return nil }},
-		MenuItem{Label: "Open Shell in " + filepath.Base(a.Repo.Root), Icon: "$", Hint: "^O", Do: func(a *App) tea.Cmd { return a.OpenShell(a.Repo.Root) }},
+		MenuItem{Label: "Open Shell in " + filepath.Base(a.Repo.Root), Icon: "$", Hint: "ctrl+o", Do: func(a *App) tea.Cmd { return a.OpenShell(a.Repo.Root) }},
 		MenuItem{Label: "Open in IntelliJ", Icon: "◧", Do: func(a *App) tea.Cmd { return a.OpenInIDE(a.Repo.Root) }},
 	)
 	m := NewMenu("Projects · "+filepath.Base(cur), items)
@@ -795,7 +792,7 @@ type pathField struct {
 func (f *pathField) WantsTab() bool { return true }
 
 func (f *pathField) Key(a *App, k tea.KeyMsg) bool {
-	if k.String() != "ctrl+i" && k.String() != "tab" {
+	if keyName(k) != "ctrl+i" && keyName(k) != "tab" {
 		return f.In.Key(k)
 	}
 	cur := f.In.Value()
