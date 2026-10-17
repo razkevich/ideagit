@@ -351,8 +351,9 @@ func (l *LocalChanges) groupFiles() ([]git.FileStatus, int) {
 func (l *LocalChanges) sources(a *App) ([]DiffSource, int) {
 	files, idx := l.groupFiles()
 	var srcs []DiffSource
+	head := a.headHash()
 	for _, f := range files {
-		srcs = append(srcs, localSource(a.Repo, f))
+		srcs = append(srcs, localSource(a.Repo, head, f))
 	}
 	return srcs, idx
 }
@@ -899,8 +900,18 @@ func OpenStashDialog(a *App, paths []string) {
 
 func relHome(p string) string {
 	home, _ := os.UserHomeDir()
-	if home != "" && strings.HasPrefix(p, home) {
-		return "~" + strings.TrimPrefix(p, home)
+	if home == "" {
+		return p
+	}
+	// git reports resolved paths, so also try the home dir with symlinks resolved.
+	homes := []string{home}
+	if real, err := filepath.EvalSymlinks(home); err == nil && real != home {
+		homes = append(homes, real)
+	}
+	for _, h := range homes {
+		if p == h || strings.HasPrefix(p, h+"/") {
+			return "~" + strings.TrimPrefix(p, h)
+		}
 	}
 	return p
 }

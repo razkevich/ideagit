@@ -595,8 +595,9 @@ func (t *LogTab) openCommitDiff(a *App) tea.Cmd {
 
 func (t *LogTab) diffFiles(a *App, hash string, files []git.ChangedFile, idx int) tea.Cmd {
 	var srcs []DiffSource
+	parent := t.parentOf(a, hash)
 	for _, f := range files {
-		srcs = append(srcs, commitSource(a.Repo, hash, f))
+		srcs = append(srcs, commitSource(a.Repo, hash, parent, f))
 	}
 	if len(srcs) == 0 {
 		return nil
@@ -604,6 +605,17 @@ func (t *LogTab) diffFiles(a *App, hash string, files []git.ChangedFile, idx int
 	w := NewDiffWindow(srcs[idx].Path)
 	a.Push(w)
 	return w.diff.SetSources(a, srcs, idx, true)
+}
+
+// parentOf uses the parents already loaded with the commit details instead of asking git.
+func (t *LogTab) parentOf(a *App, hash string) string {
+	if t.details != nil && t.details.Hash == hash {
+		if len(t.details.Parents) == 0 {
+			return git.EmptyTree
+		}
+		return t.details.Parents[0]
+	}
+	return a.Repo.ParentRev(hash)
 }
 
 func (t *LogTab) openFileDiff(a *App) tea.Cmd {
@@ -689,7 +701,7 @@ func (t *LogTab) commitMenu(a *App, x, y int) {
 	head := a.Repo.HeadHash()
 	isHead := c.Hash == head
 	branch := a.CurrentBranch()
-	pushed := isHead && a.Repo.IsAncestorOfRemote(c.Hash)
+	pushed := isHead && a.Repo.IsPushed(c.Hash)
 	items := []MenuItem{
 		{Label: "Copy Revision Number", Hint: "y", Do: func(a *App) tea.Cmd { return copyToClipboard(a, c.Hash) }},
 		{Label: "Show Diff", Hint: "⏎", Do: func(a *App) tea.Cmd { return t.openCommitDiff(a) }},

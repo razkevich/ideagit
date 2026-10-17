@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,9 @@ func (a Activity) Working() bool { return a.Open > 0 && time.Since(a.LastWrite) 
 
 // Running returns live Claude Code CLI processes with their working directories.
 func Running() []Session {
+	if runtime.GOOS == "linux" {
+		return runningProc()
+	}
 	out, err := exec.Command("ps", "-axo", "pid=,args=").Output()
 	if err != nil {
 		return nil
@@ -38,14 +42,9 @@ func Running() []Session {
 	var pids []string
 	for _, l := range strings.Split(string(out), "\n") {
 		f := strings.Fields(l)
-		if len(f) < 2 || filepath.Base(f[1]) != "claude" {
-			continue
+		if len(f) >= 2 && isClaude(f[1:]) {
+			pids = append(pids, f[0])
 		}
-		// Background helpers (bg-pty-host, bg-spare) aren't user sessions.
-		if len(f) > 2 && strings.HasPrefix(f[2], "bg-") {
-			continue
-		}
-		pids = append(pids, f[0])
 	}
 	if len(pids) == 0 {
 		return nil
@@ -65,6 +64,49 @@ func Running() []Session {
 		}
 	}
 	return res
+}
+
+// runningProc reads /proc directly so Linux doesn't need lsof.
+func runningProc() []Session {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var res []Session
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if !isClaude(args) {
+			continue
+		}
+		cwd, err := os.Readlink(filepath.Join("/proc", e.Name(), "cwd"))
+		if err == nil {
+			res = append(res, Session{PID: pid, Cwd: cwd})
+		}
+	}
+	return res
+}
+
+// isClaude matches the native `claude` binary and npm installs (`node …/claude-code/cli.js`).
+func isClaude(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if filepath.Base(args[0]) == "claude" {
+		// Background helpers (bg-pty-host, bg-spare) aren't user sessions.
+		return len(args) < 2 || !strings.HasPrefix(args[1], "bg-")
+	}
+	if strings.HasPrefix(filepath.Base(args[0]), "node") && len(args) > 1 {
+		return strings.Contains(args[1], "@anthropic-ai/claude-code") || filepath.Base(args[1]) == "claude"
+	}
+	return false
 }
 
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9-]`)

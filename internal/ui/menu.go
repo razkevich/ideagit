@@ -389,6 +389,10 @@ func (m *Menu) Draw(a *App, screen View) {
 		}
 		idx := vi
 		a.Hit(rv.Abs(), func(mm Mouse) tea.Cmd {
+			if mm.Action == tea.MouseActionMotion && !it.Disabled {
+				m.sel = idx
+				return nil
+			}
 			if mm.LeftPress() {
 				m.sel = idx
 				if m.child != nil {
@@ -407,7 +411,7 @@ func (m *Menu) Draw(a *App, screen View) {
 		v.TextFit(2, h-2, m.Footer, w-4, Style{Fg: th.Dim, Bg: bg})
 	}
 	abs := v.Abs()
-	a.Hit(abs, func(mm Mouse) tea.Cmd {
+	a.HitPass(abs, func(mm Mouse) tea.Cmd {
 		if d := mm.Wheel(); d != 0 {
 			m.top = max(0, min(len(m.vis)-listH, m.top+d))
 		}

@@ -150,7 +150,7 @@ func (f *ListField) Draw(a *App, v View, _ bool, _ *Dialog) {
 	if len(f.Lines) > v.H() {
 		DrawScrollbar(a, v.Sub(v.W()-1, 0, 1, v.H()), f.top, v.H(), len(f.Lines), func(t int) { f.top = t })
 	}
-	a.Hit(v.Abs(), func(m Mouse) tea.Cmd {
+	a.HitPass(v.Abs(), func(m Mouse) tea.Cmd {
 		if d := m.Wheel(); d != 0 {
 			f.top = max(0, min(len(f.Lines)-v.H(), f.top+d))
 		}

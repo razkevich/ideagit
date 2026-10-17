@@ -385,7 +385,9 @@ func (r *Repo) MergeFile(current, base, other []byte) ([]byte, bool, error) {
 	return []byte(out), strings.Contains(out, "<<<<<<< Current"), nil
 }
 
-func (r *Repo) IsAncestorOfRemote(hash string) bool {
-	out, err := r.Read("branch", "-r", "--contains", hash)
-	return err == nil && strings.TrimSpace(out) != ""
+// IsPushed reports whether hash is already on the current branch's upstream; with no
+// upstream nothing has been pushed. (`branch -r --contains` takes seconds on big repos.)
+func (r *Repo) IsPushed(hash string) bool {
+	_, err := r.Read("merge-base", "--is-ancestor", hash, "@{upstream}")
+	return err == nil
 }

@@ -524,7 +524,8 @@ func (d *DiffView) Draw(a *App, v View) {
 	}
 	d.drawScroll(a, body.Sub(w, 0, 1, body.H()))
 	abs := body.Abs()
-	a.Hit(Rect{abs.X, abs.Y, w, body.H()}, func(m Mouse) tea.Cmd {
+	// Pass-through: chunk buttons and checkboxes drawn above must still get their clicks.
+	a.HitPass(Rect{abs.X, abs.Y, w, body.H()}, func(m Mouse) tea.Cmd {
 		if dd := m.Wheel(); dd != 0 {
 			if m.Shift {
 				d.left = max(0, d.left+dd*4)

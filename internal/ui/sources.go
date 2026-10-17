@@ -24,8 +24,9 @@ func dirOf(p string) string {
 
 func baseOf(p string) string { return path.Base(p) }
 
-func localSource(repo *git.Repo, f git.FileStatus) DiffSource {
-	head := repo.HeadHash()
+// localSource takes HEAD from the already-loaded status so building sources for a
+// whole group of files doesn't spawn a git process per file on the UI thread.
+func localSource(repo *git.Repo, head string, f git.FileStatus) DiffSource {
 	left := "Base version"
 	if head != "" {
 		left = short(head) + "  " + f.Path
@@ -64,8 +65,7 @@ func localSource(repo *git.Repo, f git.FileStatus) DiffSource {
 	}
 }
 
-func commitSource(repo *git.Repo, hash string, f git.ChangedFile) DiffSource {
-	parent := repo.ParentRev(hash)
+func commitSource(repo *git.Repo, hash, parent string, f git.ChangedFile) DiffSource {
 	leftName := short(parent)
 	if parent == git.EmptyTree {
 		leftName = "Absent"
@@ -166,4 +166,11 @@ func itoa(i int) string {
 		b = append([]byte{'-'}, b...)
 	}
 	return string(b)
+}
+
+func (a *App) headHash() string {
+	if a.Status == nil || a.Status.Unborn {
+		return ""
+	}
+	return a.Status.OID
 }

@@ -12,9 +12,17 @@ import (
 	"github.com/razkevich/ideagit/internal/ui"
 )
 
+// Set by GoReleaser via -ldflags.
+var (
+	version = "dev"
+	commit  = ""
+)
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	snapshot := flag.String("snapshot", "", "render one frame as plain text (WxH, e.g. 160x45) and exit; for testing")
 	tab := flag.Int("tab", 0, "with -snapshot: tab index to render")
+	svg := flag.String("svg", "", "with -snapshot: write the frame as an SVG image to this file")
 	keys := flag.String("keys", "", "with -snapshot: keys to send before rendering (space separated, e.g. \"down enter\")")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: ideagit [dir]\n\nAn IntelliJ-style Git tool window for the terminal.\n\n")
@@ -23,6 +31,10 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("ideagit", version, commit)
+		return
+	}
 	dir := "."
 	if flag.NArg() > 0 {
 		dir = flag.Arg(0)
@@ -37,11 +49,16 @@ func main() {
 	if *snapshot != "" {
 		var w, h int
 		fmt.Sscanf(*snapshot, "%dx%d", &w, &h)
-		os.Exit(runSnapshot(root, w, h, *tab, *keys))
+		os.Exit(runSnapshot(root, w, h, *tab, *keys, *svg))
 	}
 
-	p := tea.NewProgram(root, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
-	if _, err := p.Run(); err != nil {
+	// XTSHIFTESCAPE: ask the terminal (Ghostty, xterm) to report Shift+click to us
+	// instead of using it for its own text selection.
+	os.Stdout.WriteString("\x1b[>1s")
+	p := tea.NewProgram(root, tea.WithAltScreen(), tea.WithMouseAllMotion(), tea.WithReportFocus())
+	_, err = p.Run()
+	os.Stdout.WriteString("\x1b[>0s")
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "ideagit:", err)
 		os.Exit(1)
 	}
@@ -51,7 +68,7 @@ func main() {
 }
 
 // runSnapshot drives the model synchronously, executing commands until it settles, then prints the frame.
-func runSnapshot(root *ui.Root, w, h, tab int, keys string) int {
+func runSnapshot(root *ui.Root, w, h, tab int, keys, svg string) int {
 	root.App.SnapshotMode(w, h)
 	pump := func(cmd tea.Cmd) {
 		queue := []tea.Cmd{cmd}
@@ -84,6 +101,14 @@ func runSnapshot(root *ui.Root, w, h, tab int, keys string) int {
 		_, cmd := root.Update(k)
 		pump(cmd)
 	}
+	if svg != "" {
+		th := root.App.Th
+		if err := os.WriteFile(svg, []byte(root.App.Render().SVG(th.Fg, th.Bg)), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	fmt.Println(root.View())
 	return 0
 }
@@ -107,7 +132,7 @@ func splitKeys(s string) []tea.Msg {
 	var res []tea.Msg
 	names := map[string]tea.KeyType{
 		"enter": tea.KeyEnter, "esc": tea.KeyEsc, "tab": tea.KeyTab, "up": tea.KeyUp, "down": tea.KeyDown,
-		"left": tea.KeyLeft, "right": tea.KeyRight, "space": tea.KeySpace, "f7": tea.KeyF7, "ctrl+k": tea.KeyCtrlK,
+		"left": tea.KeyLeft, "right": tea.KeyRight, "space": tea.KeySpace, "f7": tea.KeyF7, "ctrl+k": tea.KeyCtrlK, "ctrl+z": tea.KeyCtrlZ,
 		"pgdown": tea.KeyPgDown, "pgup": tea.KeyPgUp, "shift+tab": tea.KeyShiftTab, "backspace": tea.KeyBackspace,
 	}
 	for _, k := range splitFields(s) {
@@ -118,6 +143,10 @@ func splitKeys(s string) []tea.Msg {
 		}
 		if n, _ := fmt.Sscanf(k, "wheeldown:%d,%d", &x, &y); n == 2 {
 			res = append(res, tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+			continue
+		}
+		if n, _ := fmt.Sscanf(k, "sclick:%d,%d", &x, &y); n == 2 {
+			res = append(res, tea.MouseMsg{X: x, Y: y, Shift: true, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 			continue
 		}
 		if n, _ := fmt.Sscanf(k, "rclick:%d,%d", &x, &y); n == 2 {

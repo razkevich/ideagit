@@ -116,11 +116,18 @@ func Layout(commits []*git.Commit) []Row {
 				if i < col {
 					r = '╰'
 				}
+				if i > lo && i < hi {
+					// The horizontal line continues past this lane.
+					r = '┴'
+				}
 				cells[x] = Cell{r, before[i].color}
 			case newParents[i]:
 				r := '╮'
 				if i < col {
 					r = '╭'
+				}
+				if i > lo && i < hi {
+					r = '┬'
 				}
 				cells[x] = Cell{r, lanes[i].color}
 			case joinParents[i]:

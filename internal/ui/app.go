@@ -154,7 +154,11 @@ type App struct {
 func NewApp(repo *git.Repo) *App {
 	cfg := LoadConfig()
 	th := DarkTheme()
-	switch cfg.Theme {
+	theme := cfg.Theme
+	if env := os.Getenv("IDEAGIT_THEME"); env != "" {
+		theme = env
+	}
+	switch theme {
 	case "light":
 		th = LightTheme()
 	case "dark":
@@ -623,7 +627,16 @@ func (a *App) handleMouse(m tea.MouseMsg) tea.Cmd {
 			return a.drag(ev)
 		}
 	}
-	if ev.Action == tea.MouseActionMotion || ev.Action == tea.MouseActionRelease {
+	if ev.Action == tea.MouseActionRelease {
+		return nil
+	}
+	if ev.Action == tea.MouseActionMotion {
+		// Hover only goes to the topmost handler (menus highlight the item under the pointer).
+		for i := len(a.hits) - 1; i >= 0; i-- {
+			if a.hits[i].r.Contains(ev.X, ev.Y) && !a.hits[i].pass {
+				return a.hits[i].fn(ev)
+			}
+		}
 		return nil
 	}
 	if ev.LeftPress() {
@@ -890,7 +903,7 @@ func (a *App) drawNotes(v View) {
 			}
 		}
 		idx := i
-		a.Hit(box.Abs(), func(m Mouse) tea.Cmd {
+		a.HitPass(box.Abs(), func(m Mouse) tea.Cmd {
 			if m.LeftPress() && idx < len(a.notes) {
 				a.notes = slices.Delete(a.notes, idx, idx+1)
 			}

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -47,13 +48,32 @@ type CommitDialog struct {
 	files     []git.FileStatus
 	savedMsg  string
 	Err       string
+	untracked map[string][]string
+}
+
+// untrackedUnder lists an untracked folder once per dialog; rebuild runs on every
+// checkbox toggle. Folders holding only worktrees are skipped like in Local Changes.
+func (d *CommitDialog) untrackedUnder(a *App, dir string) []string {
+	if files, ok := d.untracked[dir]; ok {
+		return files
+	}
+	var files []string
+	wts := map[string]bool{}
+	for _, w := range a.Worktrees {
+		wts[filepath.Clean(w.Path)] = true
+	}
+	if worktreeContainer(filepath.Clean(a.Repo.Abs(dir)), wts) == 0 {
+		files = a.Repo.UntrackedUnder(dir)
+	}
+	d.untracked[dir] = files
+	return files
 }
 
 func (a *App) OpenCommit(preselect []git.FileStatus) tea.Cmd {
 	if a.Status == nil {
 		return nil
 	}
-	d := &CommitDialog{tree: NewTree(), diff: NewDiffView(), msg: NewTextArea(""), author: NewInput(""), checked: map[string]bool{}, runHooks: true}
+	d := &CommitDialog{tree: NewTree(), diff: NewDiffView(), msg: NewTextArea(""), author: NewInput(""), checked: map[string]bool{}, runHooks: true, untracked: map[string][]string{}}
 	d.author.Placeholder = a.Repo.UserName() + " <" + a.Repo.UserEmail() + ">"
 	d.msg.Placeholder = "Commit Message"
 	d.hasHooks = a.Repo.HasHooks()
@@ -131,11 +151,11 @@ func (d *CommitDialog) rebuild(a *App) {
 		case f.Kind == git.Untracked:
 			if !f.IsDir {
 				unversioned = append(unversioned, f)
-			} else {
-				for _, p := range a.Repo.UntrackedUnder(f.Path) {
-					if len(unversioned) < 500 {
-						unversioned = append(unversioned, git.FileStatus{Path: p, Kind: git.Untracked, X: '?', Y: '?'})
-					}
+				break
+			}
+			for _, p := range d.untrackedUnder(a, f.Path) {
+				if len(unversioned) < 500 {
+					unversioned = append(unversioned, git.FileStatus{Path: p, Kind: git.Untracked, X: '?', Y: '?'})
 				}
 			}
 		case a.CLMap[f.Path] == d.list || f.Kind == git.Conflict:
@@ -221,7 +241,7 @@ func (d *CommitDialog) preview(a *App) tea.Cmd {
 		if x.Path == f.Path {
 			idx = len(srcs)
 		}
-		srcs = append(srcs, localSource(a.Repo, x))
+		srcs = append(srcs, localSource(a.Repo, a.headHash(), x))
 	}
 	return d.diff.SetSources(a, srcs, idx, false)
 }
