@@ -1,0 +1,64 @@
+version: 2
+project_name: ideagit
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: arm
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+
+nfpms:
+  - id: packages
+    package_name: ideagit
+    file_name_template: >-
+      {{ .PackageName }}_{{ .Version }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+    homepage: https://github.com/razkevich/ideagit
+    maintainer: razkevich <razkevich@users.noreply.github.com>
+    description: IntelliJ IDEA's Git tool window as a terminal app.
+    formats: [deb, rpm, apk, archlinux]
+    dependencies:
+      - git
+    section: devel
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: razkevich
+    name: ideagit
+  footer: |
+    **Install**
+
+    - macOS / Linux: download the archive for your platform, extract, put `ideagit` on your PATH
+      (macOS: `xattr -d com.apple.quarantine ideagit` if Gatekeeper blocks the unsigned binary)
+    - Debian/Ubuntu: `sudo apt install ./ideagit_*.deb` · Fedora/RHEL/openSUSE: `sudo rpm -i ideagit_*.rpm`
+    - Alpine: `sudo apk add --allow-untrusted ideagit_*.apk` · Arch: `sudo pacman -U ideagit_*.pkg.tar.zst`
+    - Go: `go install github.com/razkevich/ideagit@latest`

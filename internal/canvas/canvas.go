@@ -1,6 +1,7 @@
 package canvas
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -326,4 +327,77 @@ func TruncateLeft(s string, w int) string {
 		i--
 	}
 	return "…" + string(rs[i:])
+}
+
+// SVG renders the canvas as an SVG image (for README screenshots), one text run per
+// style change, stretched to the exact cell grid so columns line up in any font.
+func (c *Canvas) SVG(defaultFg, defaultBg Color) string {
+	const cw, ch, fs = 8.4, 18.0, 14.0
+	var b strings.Builder
+	w, h := float64(c.W)*cw, float64(c.H)*ch
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="%.0f" height="%.0f" viewBox="0 0 %.0f %.0f">`, w, h, w, h)
+	b.WriteString(`<style>text{font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;font-size:14px;white-space:pre}</style>`)
+	fmt.Fprintf(&b, `<rect width="100%%" height="100%%" fill="%s" rx="8"/>`, defaultBg.hex())
+	for y := 0; y < c.H; y++ {
+		for x := 0; x < c.W; {
+			bg := c.cells[y*c.W+x].S.Bg
+			start := x
+			for x < c.W && c.cells[y*c.W+x].S.Bg == bg {
+				x++
+			}
+			if bg != NoColor && bg != defaultBg {
+				fmt.Fprintf(&b, `<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>`, float64(start)*cw, float64(y)*ch, float64(x-start)*cw+0.5, ch+0.5, bg.hex())
+			}
+		}
+		for x := 0; x < c.W; {
+			cell := c.cells[y*c.W+x]
+			st := cell.S
+			start := x
+			var run []rune
+			for x < c.W {
+				cc := c.cells[y*c.W+x]
+				if cc.S.Fg != st.Fg || cc.S.Bold != st.Bold || cc.S.Italic != st.Italic || cc.S.Underline != st.Underline || cc.S.Strike != st.Strike {
+					break
+				}
+				if !cc.cont {
+					run = append(run, cc.R)
+				}
+				x++
+			}
+			text := strings.TrimRight(string(run), " ")
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			lead := len(text) - len(strings.TrimLeft(text, " "))
+			text = strings.TrimLeft(text, " ")
+			n := runewidthOf(text)
+			fg := st.Fg
+			if fg == NoColor {
+				fg = defaultFg
+			}
+			attrs := ""
+			if st.Bold {
+				attrs += ` font-weight="bold"`
+			}
+			if st.Italic {
+				attrs += ` font-style="italic"`
+			}
+			if st.Underline {
+				attrs += ` text-decoration="underline"`
+			} else if st.Strike {
+				attrs += ` text-decoration="line-through"`
+			}
+			fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" fill="%s" textLength="%.1f" lengthAdjust="spacingAndGlyphs"%s>%s</text>`,
+				float64(start+lead)*cw, float64(y)*ch+ch*0.76, fg.hex(), float64(n)*cw, attrs, xmlEscape(text))
+		}
+	}
+	b.WriteString(`</svg>`)
+	return b.String()
+}
+
+func runewidthOf(s string) int { return runewidth.StringWidth(s) }
+
+func xmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	return r.Replace(s)
 }
