@@ -7,6 +7,17 @@ familiar: same tabs, same dialogs, same diff viewer, same context menus. Keyboar
 and mouse both work everywhere (click, double-click, right-click menus, wheel,
 draggable splitters).
 
+![Local Changes with diff preview](docs/local-changes.svg)
+
+<table>
+<tr><td><img src="docs/log.svg" alt="Log with branch graph and filters"></td><td><img src="docs/commit.svg" alt="Commit Changes dialog"></td></tr>
+<tr><td align="center">Log</td><td align="center">Commit Changes (<code>Ctrl+K</code>)</td></tr>
+<tr><td><img src="docs/diff.svg" alt="Side-by-side diff viewer"></td><td><img src="docs/worktrees.svg" alt="Worktrees with Claude Code sessions"></td></tr>
+<tr><td align="center">Diff viewer</td><td align="center">Worktrees with live Claude Code sessions</td></tr>
+<tr><td><img src="docs/branches.svg" alt="Git Branches popup"></td><td><img src="docs/stash.svg" alt="Stash tab"></td></tr>
+<tr><td align="center">Branches popup (<code>b</code>)</td><td align="center">Stash</td></tr>
+</table>
+
 ## Features
 
 **Local Changes**
@@ -51,9 +62,22 @@ running** — working or idle — with its last prompt. Clean up merged worktree
 
 ## Install
 
-    go install github.com/razkevich/ideagit@latest
+Download a build for macOS or Linux from [Releases](https://github.com/razkevich/ideagit/releases):
 
-Requires Go 1.26+ and git. Run `ideagit [dir]`; press `?` for every shortcut.
+| Platform | Package |
+| --- | --- |
+| macOS (Apple Silicon / Intel) | `ideagit_<version>_darwin_arm64.tar.gz` / `_darwin_x86_64.tar.gz` |
+| Debian, Ubuntu | `sudo apt install ./ideagit_<version>_amd64.deb` |
+| Fedora, RHEL, openSUSE | `sudo rpm -i ideagit_<version>_amd64.rpm` |
+| Alpine | `sudo apk add --allow-untrusted ideagit_<version>_amd64.apk` |
+| Arch | `sudo pacman -U ideagit_<version>_amd64.pkg.tar.zst` |
+| Any Linux (static binary, x86_64 / arm64 / armv7) | `ideagit_<version>_linux_*.tar.gz` |
+
+On macOS, if Gatekeeper blocks the unsigned binary: `xattr -d com.apple.quarantine ideagit`.
+
+Or with Go 1.26+: `go install github.com/razkevich/ideagit@latest`
+
+Requires git. Run `ideagit [dir]`; press `?` for every shortcut.
 
 To land in the last worktree you switched to after quitting, add to your shell rc:
 
@@ -80,7 +104,10 @@ Settings live in `~/Library/Application Support/ideagit/settings.json` (or
 detection. Changelists are stored per repository in `.git/ideagit/changelists.json`
 and imported once from `.idea/workspace.xml`.
 
-## Testing
+## Development
 
     go test ./...
     ideagit -snapshot 160x40 -tab 3 -keys "down enter"   # render a frame as text
+    ./scripts/screenshots.sh                             # regenerate docs/*.svg from a demo repo
+
+Releases are built by GoReleaser when a `v*` tag is pushed.
